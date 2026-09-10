@@ -291,14 +291,14 @@ function view() {
     const automated = s.turns === 0 || (s.entrypoint && s.entrypoint !== "cli");
     return {
       id: s.id, shortId: s.id.slice(0, 8), title, titleSource, leftOff: sum?.leftOff ?? null,
-      lastActivityAt: s.lastActivityAt ?? null, firstAt: s.firstAt ?? null, lastPrompt: s.lastPrompt ?? null,
+      lastActivityAt: s.lastActivityAt ?? s.firstAt ?? new Date(s.mtimeMs || 0).toISOString(), firstAt: s.firstAt ?? null, lastPrompt: s.lastPrompt ?? null,
       project: s.cwd ? basename(s.cwd) : s.project, cwd: s.cwd ?? null, gitBranch: s.gitBranch ?? null,
       state, alive, needsInput: s.needsInput?.message ?? lv?.waitingFor ?? null,
       live: lv ? { pid: lv.pid, kind: lv.kind, name: lv.name, status: lv.status, state: lv.state, waitingFor: lv.waitingFor, shortId: lv.id } : null,
       agents, runningAgents: running, turns: s.turns, costUSD: s.costUSD ?? null, continuedIn: s.continuedIn ?? null, automated,
       resume: { command: resume, forkCommand: `claude --resume ${s.id} --fork-session`, cwd: s.cwd ?? null },
     };
-  }).sort((a, b) => (b.lastActivityAt ?? "").localeCompare(a.lastActivityAt ?? ""));
+  }).sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt));
   const needsInput = rows.filter((r) => r.state === "needs_input").length;
   const working = rows.filter((r) => r.state === "working").length;
   return { generatedAt: new Date(now).toISOString(), counts: { total: rows.length, needsInput, working, alive: rows.filter((r) => r.alive).length, summariesPending: summaryQueue.length + summarising }, live: { updatedAt: liveUpdatedAt ? new Date(liveUpdatedAt).toISOString() : null, error: liveError ?? null }, sessions: rows };

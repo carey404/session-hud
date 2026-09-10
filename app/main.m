@@ -9,7 +9,9 @@ static const CGFloat kRowHeight = 78;
 static const CGFloat kWidth = 500;
 
 // ---------- helpers ----------
-static NSString *relTime(NSString *iso) {
+static NSString *S(id v) { return [v isKindOfClass:NSString.class] ? v : @""; } // JSON null arrives as NSNull
+static NSString *relTime(id isoV) {
+    NSString *iso = S(isoV);
     if (!iso.length) return @"";
     NSISO8601DateFormatter *f = [NSISO8601DateFormatter new];
     f.formatOptions = NSISO8601DateFormatWithInternetDateTime | NSISO8601DateFormatWithFractionalSeconds;
@@ -60,7 +62,7 @@ static NSTextField *label(CGFloat size, NSFontWeight w, NSColor *c) {
 @implementation Launcher
 + (NSString *)shellQuote:(NSString *)s { return [NSString stringWithFormat:@"'%@'", [s stringByReplacingOccurrencesOfString:@"'" withString:@"'\\''"]]; }
 + (void)resume:(NSDictionary *)row {
-    NSDictionary *r = row[@"resume"]; NSString *cmd = r[@"command"]; NSString *cwd = [r[@"cwd"] isKindOfClass:NSString.class] ? r[@"cwd"] : NSHomeDirectory();
+    NSDictionary *r = [row[@"resume"] isKindOfClass:NSDictionary.class] ? row[@"resume"] : @{}; NSString *cmd = S(r[@"command"]); if (!cmd.length) return; NSString *cwd = S(r[@"cwd"]).length ? S(r[@"cwd"]) : NSHomeDirectory();
     NSString *term = [[NSUserDefaults standardUserDefaults] stringForKey:@"terminal"] ?: @"warp";
     NSString *full = [NSString stringWithFormat:@"cd %@ && %@", [self shellQuote:cwd], cmd];
     if ([term isEqualToString:@"warp"]) {
@@ -120,23 +122,23 @@ static NSTextField *label(CGFloat size, NSFontWeight w, NSColor *c) {
 }
 - (void)setRow:(NSDictionary *)row {
     _row = row;
-    NSString *st = row[@"state"];
+    NSString *st = S(row[@"state"]);
     _dot.textColor = stateColor(st);
-    _title.stringValue = [row[@"title"] description] ?: @"";
+    _title.stringValue = S(row[@"title"]).length ? S(row[@"title"]) : @"(untitled)";
     id lo = row[@"leftOff"]; NSString *lp = [row[@"lastPrompt"] isKindOfClass:NSString.class] ? row[@"lastPrompt"] : @"";
     _leftOff.stringValue = [lo isKindOfClass:NSString.class] && [lo length] ? lo : (lp.length ? [@"Last prompt: " stringByAppendingString:lp] : @"");
     _leftOff.textColor = ([lo isKindOfClass:NSString.class] && [lo length]) ? NSColor.secondaryLabelColor : NSColor.tertiaryLabelColor;
     NSString *ni = [row[@"needsInput"] isKindOfClass:NSString.class] ? row[@"needsInput"] : nil;
     NSMutableArray *parts = [NSMutableArray arrayWithObjects:stateLabel(st), relTime(row[@"lastActivityAt"]), nil];
     if ([row[@"project"] isKindOfClass:NSString.class]) [parts addObject:row[@"project"]];
-    [parts addObject:[NSString stringWithFormat:@"%@ turns", row[@"turns"]]];
+    [parts addObject:[NSString stringWithFormat:@"%@ turns", [row[@"turns"] isKindOfClass:NSNumber.class] ? row[@"turns"] : @0]];
     if ([row[@"automated"] boolValue]) [parts addObject:@"automated"];
     if (ni) [parts addObject:ni];
     _meta.stringValue = [parts componentsJoinedByString:@"  ·  "];
     NSInteger running = [row[@"runningAgents"] integerValue]; NSArray *ag = row[@"agents"];
     if (running > 0) {
         NSDictionary *first = nil; for (NSDictionary *a in ag) if ([a[@"status"] isEqualToString:@"running"]) { first = a; break; }
-        NSString *d = [first[@"description"] length] ? first[@"description"] : first[@"type"];
+        NSString *d = S(first[@"description"]).length ? S(first[@"description"]) : S(first[@"type"]);
         _agents.stringValue = [NSString stringWithFormat:@"⟳ %ld agent%@: %@", (long)running, running == 1 ? @"" : @"s", d ?: @""];
         _agents.textColor = NSColor.systemOrangeColor;
     } else if (ag.count) { _agents.stringValue = [NSString stringWithFormat:@"%lu agents done", (unsigned long)ag.count]; _agents.textColor = NSColor.tertiaryLabelColor; }
@@ -149,7 +151,8 @@ static NSTextField *label(CGFloat size, NSFontWeight w, NSColor *c) {
 }
 - (void)resume:(id)s { [Launcher resume:_row]; [NSApp sendAction:@selector(closePopover:) to:nil from:self]; }
 - (void)doCopy:(id)s {
-    NSPasteboard *pb = NSPasteboard.generalPasteboard; [pb clearContents]; [pb setString:_row[@"resume"][@"command"] forType:NSPasteboardTypeString];
+    NSString *cmd = S([_row[@"resume"] isKindOfClass:NSDictionary.class] ? _row[@"resume"][@"command"] : nil); if (!cmd.length) return;
+    NSPasteboard *pb = NSPasteboard.generalPasteboard; [pb clearContents]; [pb setString:cmd forType:NSPasteboardTypeString];
     _btnCopy.title = @"Copied"; dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.2 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ self.btnCopy.title = @"Copy"; [self setNeedsLayout:YES]; });
 }
 @end
@@ -221,19 +224,19 @@ static NSTextField *label(CGFloat size, NSFontWeight w, NSColor *c) {
     for (NSDictionary *r in _all) {
         if (!showAuto && [r[@"automated"] boolValue]) continue;
         if (seg < 2 && ![r[@"alive"] boolValue]) {
-            NSString *iso = [r[@"lastActivityAt"] isKindOfClass:NSString.class] ? r[@"lastActivityAt"] : nil; NSDate *d = iso ? [f dateFromString:iso] : nil;
+            NSString *iso = S(r[@"lastActivityAt"]); NSDate *d = iso.length ? [f dateFromString:iso] : nil;
             if (!d || [d compare:cut] == NSOrderedAscending) continue;
         }
         [out addObject:r];
     }
     [out sortUsingComparator:^NSComparisonResult(NSDictionary *a, NSDictionary *b) {
-        int ra = stateRank(a[@"state"]), rb = stateRank(b[@"state"]);
+        int ra = stateRank(S(a[@"state"])), rb = stateRank(S(b[@"state"]));
         if (ra != rb) return ra < rb ? NSOrderedAscending : NSOrderedDescending;
-        return [[b[@"lastActivityAt"] description] compare:[a[@"lastActivityAt"] description]];
+        return [S(b[@"lastActivityAt"]) compare:S(a[@"lastActivityAt"])];
     }];
-    NSString *selId = _table.selectedRow >= 0 && _table.selectedRow < (NSInteger)_rows.count ? _rows[_table.selectedRow][@"id"] : nil;
+    NSString *selId = _table.selectedRow >= 0 && _table.selectedRow < (NSInteger)_rows.count ? S(_rows[_table.selectedRow][@"id"]) : nil;
     _rows = out; [_table reloadData];
-    if (selId) { NSUInteger i = [_rows indexOfObjectPassingTest:^BOOL(NSDictionary *r, NSUInteger idx, BOOL *stop) { return [r[@"id"] isEqualToString:selId]; }]; if (i != NSNotFound) [_table selectRowIndexes:[NSIndexSet indexSetWithIndex:i] byExtendingSelection:NO]; }
+    if (selId.length) { NSUInteger i = [_rows indexOfObjectPassingTest:^BOOL(NSDictionary *r, NSUInteger idx, BOOL *stop) { return [S(r[@"id"]) isEqualToString:selId]; }]; if (i != NSNotFound) [_table selectRowIndexes:[NSIndexSet indexSetWithIndex:i] byExtendingSelection:NO]; }
 }
 - (NSInteger)numberOfRowsInTableView:(NSTableView *)t { return _rows.count; }
 - (NSView *)tableView:(NSTableView *)t viewForTableColumn:(NSTableColumn *)c row:(NSInteger)r {
@@ -251,6 +254,7 @@ static NSTextField *label(CGFloat size, NSFontWeight w, NSColor *c) {
 @end
 
 static OSStatus hotKeyHandler(EventHandlerCallRef next, EventRef event, void *userData) {
+    NSLog(@"hotkey pressed");
     dispatch_async(dispatch_get_main_queue(), ^{ [(__bridge AppDelegate *)userData hotkeyPressed]; });
     return noErr;
 }
@@ -262,11 +266,15 @@ static OSStatus hotKeyHandler(EventHandlerCallRef next, EventRef event, void *us
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
     UInt32 code = [d objectForKey:@"hotkeyKeyCode"] ? (UInt32)[d integerForKey:@"hotkeyKeyCode"] : kVK_ANSI_H;
     UInt32 mods = [d objectForKey:@"hotkeyModifiers"] ? (UInt32)[d integerForKey:@"hotkeyModifiers"] : (controlKey | optionKey);
-    EventTypeSpec spec = { kEventClassKeyboard, kEventHotKeyPressed };
-    InstallApplicationEventHandler(&hotKeyHandler, 1, &spec, (__bridge void *)self, NULL);
+    static BOOL installed = NO;
+    if (!installed) { EventTypeSpec spec = { kEventClassKeyboard, kEventHotKeyPressed }; InstallApplicationEventHandler(&hotKeyHandler, 1, &spec, (__bridge void *)self, NULL); installed = YES; }
     EventHotKeyID hid = { 'SHUD', 1 };
     OSStatus st = RegisterEventHotKey(code, mods, hid, GetApplicationEventTarget(), 0, &_hotKeyRef);
     NSLog(@"hotkey register keyCode=%u mods=%u status=%d", code, mods, (int)st);
+    if (st != noErr) { // eventHotKeyExistsErr (-9878): a previous instance may still hold it; retry
+        static int attempts = 0;
+        if (++attempts < 6) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [self registerHotkey]; });
+    }
 }
 - (NSString *)hotkeyLabel {
     NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
@@ -337,7 +345,7 @@ static OSStatus hotKeyHandler(EventHandlerCallRef next, EventRef event, void *us
     if (getenv("HUD_DEBUG_SHOW")) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [self toggle:nil]; });
 }
 - (void)toggle:(id)s {
-    NSEvent *e = NSApp.currentEvent;
+    NSEvent *e = s ? NSApp.currentEvent : nil; // nil sender = hotkey; never read a stale mouse event then
     if (e.type == NSEventTypeRightMouseUp) {
         NSMenu *m = [NSMenu new];
         NSString *term = [[NSUserDefaults standardUserDefaults] stringForKey:@"terminal"] ?: @"warp";
@@ -390,8 +398,12 @@ static OSStatus hotKeyHandler(EventHandlerCallRef next, EventRef event, void *us
 - (BOOL)applicationSupportsSecureRestorableState:(NSApplication *)app { return YES; }
 @end
 
+static void uncaught(NSException *e) { NSLog(@"UNCAUGHT %@: %@\n%@", e.name, e.reason, e.callStackSymbols); }
 int main(int argc, const char *argv[]) {
     @autoreleasepool {
+        NSString *logPath = [@"~/Library/Logs/SessionHUD.log" stringByExpandingTildeInPath];
+        freopen(logPath.fileSystemRepresentation, "a", stderr);
+        NSSetUncaughtExceptionHandler(&uncaught);
         NSApplication *app = [NSApplication sharedApplication];
         AppDelegate *d = [AppDelegate new]; app.delegate = d;
         [app setActivationPolicy:NSApplicationActivationPolicyAccessory];
