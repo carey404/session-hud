@@ -7,5 +7,10 @@ macOS menubar HUD of every Claude Code session on this machine: thematic title, 
 - `scripts/install-hooks.ts`: adds async hooks to `~/.claude/settings.json` that POST to the server (`--remove` to undo). `scripts/hud-hook.sh` is the bridge.
 - `scripts/install-launch-agent.sh`: optional launch at login.
 
-Right-click the menubar icon: choose Warp or Terminal.app for resume, regenerate titles, quit. Keys in the popover: enter resume, c copy, j/k move.
-Env: `HUD_SUMMARISE=0` disables the summariser, `HUD_SUMMARY_DAYS` (30) bounds backfill, `HUD_DEBUG_SHOW=1` opens the popover on launch.
+Right-click the menubar icon: choose Warp or Terminal.app for resume, detach or reattach, regenerate titles, quit. Keys in the popover: enter resume, c copy, j/k move, esc close.
+
+Global hotkey ⌃⌥H toggles the HUD (popover, or the floating panel once detached). Override with
+`defaults write com.mikecarey.SessionHUD hotkeyKeyCode -int <kVK code>` and `hotkeyModifiers -int <Carbon modifier bits>`, then relaunch.
+
+Detach: click the panel icon in the header, or drag the popover away from the menubar. The panel floats above other windows on every Space; close it to reattach to the menubar. Its position is remembered.
+Env: `HUD_SUMMARISE=0` disables the summariser, `HUD_SUMMARY_DAYS` (30) bounds backfill, `HUD_DEBUG_SHOW=1` opens the popover on launch, `HUD_DEBUG_DETACH=1` starts detached (run the binary directly; `open` does not pass env vars).

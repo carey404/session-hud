@@ -1,6 +1,7 @@
 // Session HUD: macOS menubar app. Thin client over the Bun server at 127.0.0.1:4243.
 // AppKit in Objective-C so it builds with Command Line Tools alone (the CLT Swift compiler and SDK are mismatched on this machine).
 #import <Cocoa/Cocoa.h>
+#import <Carbon/Carbon.h>
 
 static NSString *const kServer = @"http://127.0.0.1:4243";
 static NSString *const kServerDir = @"~/Development/session-hud";
@@ -156,6 +157,7 @@ static NSTextField *label(CGFloat size, NSFontWeight w, NSColor *c) {
 // ---------- table with keys ----------
 @interface HUDTable : NSTableView @end
 @implementation HUDTable
+- (void)cancelOperation:(id)s { [NSApp sendAction:@selector(closePopover:) to:nil from:self]; }
 - (void)keyDown:(NSEvent *)e {
     NSString *c = e.charactersIgnoringModifiers;
     if ([c isEqualToString:@"\r"] || [c isEqualToString:@"c"]) {
@@ -173,17 +175,20 @@ static NSTextField *label(CGFloat size, NSFontWeight w, NSColor *c) {
 // ---------- view controller ----------
 @interface HUDController : NSViewController <NSTableViewDataSource, NSTableViewDelegate>
 @property NSArray *all, *rows; @property (nonatomic) NSDictionary *payload;
-@property HUDTable *table; @property NSTextField *header, *status; @property NSSegmentedControl *filter; @property NSButton *autoToggle;
+@property HUDTable *table; @property NSTextField *header, *status; @property NSSegmentedControl *filter; @property NSButton *autoToggle, *detachBtn;
 @end
 @implementation HUDController
 - (void)loadView {
     NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, kWidth, 600)];
-    _header = label(12, NSFontWeightSemibold, NSColor.labelColor); _header.frame = NSMakeRect(14, 600 - 30, 250, 18); _header.autoresizingMask = NSViewMinYMargin;
+    _header = label(12, NSFontWeightSemibold, NSColor.labelColor); _header.frame = NSMakeRect(14, 600 - 30, 220, 18); _header.autoresizingMask = NSViewMinYMargin;
     _filter = [NSSegmentedControl segmentedControlWithLabels:@[@"Active", @"Week", @"All"] trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(refilter:)];
     _filter.selectedSegment = 0; _filter.controlSize = NSControlSizeSmall; _filter.font = [NSFont systemFontOfSize:11]; [_filter sizeToFit];
     _filter.frame = NSMakeRect(kWidth - 14 - _filter.frame.size.width, 600 - 32, _filter.frame.size.width, 22); _filter.autoresizingMask = NSViewMinYMargin | NSViewMinXMargin;
     _autoToggle = [NSButton checkboxWithTitle:@"automated" target:self action:@selector(refilter:)]; _autoToggle.controlSize = NSControlSizeSmall; _autoToggle.font = [NSFont systemFontOfSize:10.5]; [_autoToggle sizeToFit];
     _autoToggle.frame = NSMakeRect(_filter.frame.origin.x - 10 - _autoToggle.frame.size.width, 600 - 30, _autoToggle.frame.size.width, 18); _autoToggle.autoresizingMask = NSViewMinYMargin | NSViewMinXMargin;
+    _detachBtn = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"pip.exit" accessibilityDescription:@"Detach"] target:nil action:@selector(toggleDetach:)];
+    _detachBtn.bezelStyle = NSBezelStyleTexturedRounded; _detachBtn.bordered = NO; _detachBtn.toolTip = @"Detach to a floating panel (or drag the popover away). Close the panel to reattach."; _detachBtn.controlSize = NSControlSizeSmall;
+    _detachBtn.frame = NSMakeRect(_autoToggle.frame.origin.x - 8 - 22, 600 - 32, 22, 22); _detachBtn.autoresizingMask = NSViewMinYMargin | NSViewMinXMargin;
     NSScrollView *sv = [[NSScrollView alloc] initWithFrame:NSMakeRect(0, 26, kWidth, 600 - 26 - 40)]; sv.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable; sv.hasVerticalScroller = YES; sv.drawsBackground = NO;
     _table = [[HUDTable alloc] initWithFrame:sv.bounds]; _table.headerView = nil; _table.rowHeight = kRowHeight; _table.intercellSpacing = NSMakeSize(0, 1);
     _table.backgroundColor = NSColor.clearColor; _table.usesAlternatingRowBackgroundColors = NO; _table.style = NSTableViewStyleFullWidth; _table.selectionHighlightStyle = NSTableViewSelectionHighlightStyleRegular;
@@ -191,7 +196,7 @@ static NSTextField *label(CGFloat size, NSFontWeight w, NSColor *c) {
     _table.dataSource = self; _table.delegate = self; _table.doubleAction = @selector(dbl:); _table.target = self;
     sv.documentView = _table;
     _status = label(10.5, NSFontWeightRegular, NSColor.tertiaryLabelColor); _status.frame = NSMakeRect(14, 6, kWidth - 28, 14); _status.autoresizingMask = NSViewMaxYMargin | NSViewWidthSizable;
-    for (NSView *s in @[_header, _filter, _autoToggle, sv, _status]) [v addSubview:s];
+    for (NSView *s in @[_header, _filter, _autoToggle, _detachBtn, sv, _status]) [v addSubview:s];
     self.view = v;
 }
 - (void)dbl:(id)s { NSInteger r = _table.clickedRow; if (r >= 0) [(RowView *)[_table viewAtColumn:0 row:r makeIfNecessary:NO] resume:nil]; }
@@ -239,10 +244,85 @@ static NSTextField *label(CGFloat size, NSFontWeight w, NSColor *c) {
 @end
 
 // ---------- app delegate ----------
-@interface AppDelegate : NSObject <NSApplicationDelegate, NSPopoverDelegate>
+@interface AppDelegate : NSObject <NSApplicationDelegate, NSPopoverDelegate, NSWindowDelegate>
 @property NSStatusItem *item; @property NSPopover *popover; @property HUDController *hud; @property NSTimer *timer; @property NSDate *lastServerStart; @property BOOL offline;
+@property NSPanel *panel; @property EventHotKeyRef hotKeyRef;
+- (void)hotkeyPressed;
 @end
+
+static OSStatus hotKeyHandler(EventHandlerCallRef next, EventRef event, void *userData) {
+    dispatch_async(dispatch_get_main_queue(), ^{ [(__bridge AppDelegate *)userData hotkeyPressed]; });
+    return noErr;
+}
+
 @implementation AppDelegate
+// ---- global hotkey (Carbon; works without Accessibility permission). Default ⌃⌥H; override with
+//      defaults write com.mikecarey.SessionHUD hotkeyKeyCode -int <kVK code>  and  hotkeyModifiers -int <controlKey|optionKey|cmdKey|shiftKey bits>
+- (void)registerHotkey {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    UInt32 code = [d objectForKey:@"hotkeyKeyCode"] ? (UInt32)[d integerForKey:@"hotkeyKeyCode"] : kVK_ANSI_H;
+    UInt32 mods = [d objectForKey:@"hotkeyModifiers"] ? (UInt32)[d integerForKey:@"hotkeyModifiers"] : (controlKey | optionKey);
+    EventTypeSpec spec = { kEventClassKeyboard, kEventHotKeyPressed };
+    InstallApplicationEventHandler(&hotKeyHandler, 1, &spec, (__bridge void *)self, NULL);
+    EventHotKeyID hid = { 'SHUD', 1 };
+    OSStatus st = RegisterEventHotKey(code, mods, hid, GetApplicationEventTarget(), 0, &_hotKeyRef);
+    NSLog(@"hotkey register keyCode=%u mods=%u status=%d", code, mods, (int)st);
+}
+- (NSString *)hotkeyLabel {
+    NSUserDefaults *d = [NSUserDefaults standardUserDefaults];
+    UInt32 mods = [d objectForKey:@"hotkeyModifiers"] ? (UInt32)[d integerForKey:@"hotkeyModifiers"] : (controlKey | optionKey);
+    UInt32 code = [d objectForKey:@"hotkeyKeyCode"] ? (UInt32)[d integerForKey:@"hotkeyKeyCode"] : kVK_ANSI_H;
+    NSMutableString *l = [NSMutableString string];
+    if (mods & controlKey) [l appendString:@"⌃"]; if (mods & optionKey) [l appendString:@"⌥"]; if (mods & shiftKey) [l appendString:@"⇧"]; if (mods & cmdKey) [l appendString:@"⌘"];
+    [l appendString:code == kVK_ANSI_H ? @"H" : [NSString stringWithFormat:@"key %u", code]];
+    return l;
+}
+- (void)hotkeyPressed {
+    if (_panel) { if (_panel.isVisible && _panel.isKeyWindow) [_panel orderOut:nil]; else [self showPanel]; return; }
+    [self toggle:nil];
+}
+// ---- floating panel
+- (void)showPanel {
+    [_panel makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES]; [_panel makeFirstResponder:_hud.table];
+}
+- (NSPanel *)makePanel {
+    NSPanel *p = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, kWidth, 600)
+        styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable | NSWindowStyleMaskUtilityWindow | NSWindowStyleMaskNonactivatingPanel
+        backing:NSBackingStoreBuffered defer:NO];
+    p.title = @"Session HUD"; p.level = NSFloatingWindowLevel; p.hidesOnDeactivate = NO; p.floatingPanel = YES; p.becomesKeyOnlyIfNeeded = NO;
+    p.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary;
+    p.minSize = NSMakeSize(380, 240); p.delegate = self; p.releasedWhenClosed = NO;
+    p.titlebarAppearsTransparent = YES; p.movableByWindowBackground = NO;
+    [p setFrameAutosaveName:@"SessionHUDPanel"];
+    return p;
+}
+- (void)toggleDetach:(id)s {
+    if (_panel) { [_panel close]; return; }
+    [_popover close];
+    _panel = [self makePanel];
+    _popover.contentViewController = nil;
+    _panel.contentViewController = _hud;
+    if (![_panel setFrameUsingName:@"SessionHUDPanel"]) {
+        NSRect sf = (_item.button.window.screen ?: NSScreen.mainScreen).visibleFrame;
+        [_panel setFrameTopLeftPoint:NSMakePoint(NSMaxX(sf) - kWidth - 12, NSMaxY(sf) - 8)];
+    }
+    _hud.detachBtn.image = [NSImage imageWithSystemSymbolName:@"pip.enter" accessibilityDescription:@"Reattach"];
+    [self showPanel];
+}
+// drag the popover off the menubar to detach it (native NSPopover behaviour)
+- (BOOL)popoverShouldDetach:(NSPopover *)popover { return YES; }
+- (NSWindow *)detachableWindowForPopover:(NSPopover *)popover {
+    _panel = [self makePanel];
+    _hud.detachBtn.image = [NSImage imageWithSystemSymbolName:@"pip.enter" accessibilityDescription:@"Reattach"];
+    return _panel;
+}
+- (void)windowWillClose:(NSNotification *)n {
+    if (n.object != _panel) return;
+    _panel.contentViewController = nil;
+    _popover.contentViewController = _hud;
+    _hud.detachBtn.image = [NSImage imageWithSystemSymbolName:@"pip.exit" accessibilityDescription:@"Detach"];
+    _panel = nil;
+}
 - (void)applicationDidFinishLaunching:(NSNotification *)n {
     _item = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
     _item.button.image = [NSImage imageWithSystemSymbolName:@"rectangle.stack" accessibilityDescription:@"Session HUD"];
@@ -252,6 +332,8 @@ static NSTextField *label(CGFloat size, NSFontWeight w, NSColor *c) {
     _hud = [HUDController new];
     _popover = [NSPopover new]; _popover.contentViewController = _hud; _popover.contentSize = NSMakeSize(kWidth, 600); _popover.behavior = NSPopoverBehaviorTransient; _popover.delegate = self; _popover.animates = NO;
     [self tick]; _timer = [NSTimer scheduledTimerWithTimeInterval:2 target:self selector:@selector(tick) userInfo:nil repeats:YES];
+    [self registerHotkey];
+    if (getenv("HUD_DEBUG_DETACH")) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [self toggleDetach:nil]; });
     if (getenv("HUD_DEBUG_SHOW")) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [self toggle:nil]; });
 }
 - (void)toggle:(id)s {
@@ -262,14 +344,18 @@ static NSTextField *label(CGFloat size, NSFontWeight w, NSColor *c) {
         NSMenuItem *w = [m addItemWithTitle:@"Resume in Warp" action:@selector(useWarp:) keyEquivalent:@""]; w.state = [term isEqualToString:@"warp"];
         NSMenuItem *t = [m addItemWithTitle:@"Resume in Terminal.app" action:@selector(useTerminal:) keyEquivalent:@""]; t.state = [term isEqualToString:@"terminal"];
         [m addItem:NSMenuItem.separatorItem];
+        [m addItemWithTitle:_panel ? @"Reattach to menubar" : @"Detach to floating panel" action:@selector(toggleDetach:) keyEquivalent:@""];
+        NSMenuItem *hk = [m addItemWithTitle:[NSString stringWithFormat:@"Hotkey: %@ toggles the HUD", [self hotkeyLabel]] action:nil keyEquivalent:@""]; hk.enabled = NO;
+        [m addItem:NSMenuItem.separatorItem];
         [m addItemWithTitle:@"Regenerate all titles" action:@selector(resummarise:) keyEquivalent:@""];
         [m addItemWithTitle:@"Quit Session HUD" action:@selector(terminate:) keyEquivalent:@"q"];
         [m popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, _item.button.bounds.size.height + 4) inView:_item.button]; return;
     }
     if (getenv("HUD_DEBUG_SHOW")) NSLog(@"toggle: shown=%d buttonWindow=%@ screen=%@", _popover.isShown, _item.button.window, _item.button.window.screen);
+    if (_panel) { if (_panel.isVisible) [_panel orderOut:nil]; else [self showPanel]; return; }
     if (_popover.isShown) [_popover close]; else { [self tick]; [_popover showRelativeToRect:_item.button.bounds ofView:_item.button preferredEdge:NSRectEdgeMinY]; [_popover.contentViewController.view.window makeFirstResponder:_hud.table]; [NSApp activateIgnoringOtherApps:YES]; }
 }
-- (void)closePopover:(id)s { [_popover close]; }
+- (void)closePopover:(id)s { if (_panel) return; [_popover close]; }
 - (void)useWarp:(id)s { [[NSUserDefaults standardUserDefaults] setObject:@"warp" forKey:@"terminal"]; }
 - (void)useTerminal:(id)s { [[NSUserDefaults standardUserDefaults] setObject:@"terminal" forKey:@"terminal"]; }
 - (void)resummarise:(id)s { NSMutableURLRequest *rq = [NSMutableURLRequest requestWithURL:[NSURL URLWithString:[kServer stringByAppendingString:@"/resummarise"]]]; rq.HTTPMethod = @"POST"; [[[NSURLSession sharedSession] dataTaskWithRequest:rq] resume]; }
