@@ -1,0 +1,2 @@
+{ "name": "session-hud", "private": true, "type": "module",
+  "scripts": { "server": "bun run server/index.ts", "server:nosum": "HUD_SUMMARISE=0 bun run server/index.ts" } }
