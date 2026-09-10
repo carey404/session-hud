@@ -319,10 +319,20 @@ static OSStatus hotKeyHandler(EventHandlerCallRef next, EventRef event, void *us
 }
 // drag the popover off the menubar to detach it (native NSPopover behaviour)
 - (BOOL)popoverShouldDetach:(NSPopover *)popover { return YES; }
+// AppKit does not move the popover's content into a delegate-supplied window; we move the HUD view over once the popover has closed.
 - (NSWindow *)detachableWindowForPopover:(NSPopover *)popover {
     _panel = [self makePanel];
     _hud.detachBtn.image = [NSImage imageWithSystemSymbolName:@"pip.enter" accessibilityDescription:@"Reattach"];
     return _panel;
+}
+- (void)popoverDidClose:(NSNotification *)n {
+    if (_panel && _panel.contentViewController == nil) {
+        NSRect f = _panel.frame;
+        _popover.contentViewController = nil;
+        _panel.contentViewController = _hud;
+        [_panel setFrame:f display:YES];
+        [self showPanel];
+    }
 }
 - (void)windowWillClose:(NSNotification *)n {
     if (n.object != _panel) return;
