@@ -113,8 +113,9 @@ static NSTextField *label(CGFloat size, NSFontWeight w, NSColor *c) {
     CGFloat titleRight = _resumeBtn.frame.origin.x - 8;
     _title.frame = NSMakeRect(x + 16, H - 28, titleRight - (x + 16), 18);
     _leftOff.frame = NSMakeRect(x + 16, H - 58, right - (x + 16), 30);
-    _agents.frame = NSMakeRect(right - 200, 6, 200, 14);
-    _meta.frame = NSMakeRect(x + 16, 6, right - 200 - (x + 16) - 6, 14);
+    CGFloat aw = _agents.stringValue.length ? 190 : 0;
+    _agents.frame = NSMakeRect(right - aw, 6, aw, 14);
+    _meta.frame = NSMakeRect(x + 16, 6, right - aw - (x + 16) - 6, 14);
 }
 - (void)setRow:(NSDictionary *)row {
     _row = row;
@@ -177,7 +178,7 @@ static NSTextField *label(CGFloat size, NSFontWeight w, NSColor *c) {
 @implementation HUDController
 - (void)loadView {
     NSView *v = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, kWidth, 600)];
-    _header = label(12, NSFontWeightSemibold, NSColor.labelColor); _header.frame = NSMakeRect(14, 600 - 30, 300, 18); _header.autoresizingMask = NSViewMinYMargin;
+    _header = label(12, NSFontWeightSemibold, NSColor.labelColor); _header.frame = NSMakeRect(14, 600 - 30, 250, 18); _header.autoresizingMask = NSViewMinYMargin;
     _filter = [NSSegmentedControl segmentedControlWithLabels:@[@"Active", @"Week", @"All"] trackingMode:NSSegmentSwitchTrackingSelectOne target:self action:@selector(refilter:)];
     _filter.selectedSegment = 0; _filter.controlSize = NSControlSizeSmall; _filter.font = [NSFont systemFontOfSize:11]; [_filter sizeToFit];
     _filter.frame = NSMakeRect(kWidth - 14 - _filter.frame.size.width, 600 - 32, _filter.frame.size.width, 22); _filter.autoresizingMask = NSViewMinYMargin | NSViewMinXMargin;
@@ -199,10 +200,10 @@ static NSTextField *label(CGFloat size, NSFontWeight w, NSColor *c) {
     _payload = p; _all = p[@"sessions"] ?: @[];
     NSDictionary *c = p[@"counts"];
     NSMutableArray *bits = [NSMutableArray array];
-    if ([c[@"needsInput"] integerValue]) [bits addObject:[NSString stringWithFormat:@"%@ need input", c[@"needsInput"]]];
+    if ([c[@"needsInput"] integerValue]) [bits addObject:[NSString stringWithFormat:@"%@ need%@ input", c[@"needsInput"], [c[@"needsInput"] integerValue] == 1 ? @"s" : @""]];
     if ([c[@"working"] integerValue]) [bits addObject:[NSString stringWithFormat:@"%@ working", c[@"working"]]];
     [bits addObject:[NSString stringWithFormat:@"%@ open", c[@"alive"]]];
-    _header.stringValue = [@"Claude sessions  ·  " stringByAppendingString:[bits componentsJoinedByString:@", "]];
+    _header.stringValue = [bits componentsJoinedByString:@"  ·  "];
     NSInteger pend = [c[@"summariesPending"] integerValue];
     _status.stringValue = [NSString stringWithFormat:@"%@ sessions indexed%@  ·  updated %@  ·  ⏎ resume  c copy  j/k move", c[@"total"], pend ? [NSString stringWithFormat:@", %ld titles pending", (long)pend] : @"", relTime(p[@"generatedAt"])];
     [self apply];
@@ -265,6 +266,7 @@ static NSTextField *label(CGFloat size, NSFontWeight w, NSColor *c) {
         [m addItemWithTitle:@"Quit Session HUD" action:@selector(terminate:) keyEquivalent:@"q"];
         [m popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, _item.button.bounds.size.height + 4) inView:_item.button]; return;
     }
+    if (getenv("HUD_DEBUG_SHOW")) NSLog(@"toggle: shown=%d buttonWindow=%@ screen=%@", _popover.isShown, _item.button.window, _item.button.window.screen);
     if (_popover.isShown) [_popover close]; else { [self tick]; [_popover showRelativeToRect:_item.button.bounds ofView:_item.button preferredEdge:NSRectEdgeMinY]; [_popover.contentViewController.view.window makeFirstResponder:_hud.table]; [NSApp activateIgnoringOtherApps:YES]; }
 }
 - (void)closePopover:(id)s { [_popover close]; }
@@ -285,6 +287,7 @@ static NSTextField *label(CGFloat size, NSFontWeight w, NSColor *c) {
             if (ni) [t appendFormat:@" %ld!", (long)ni];
             if (wk) [t appendFormat:@" %ld", (long)wk];
             self.item.button.title = t;
+            if (getenv("HUD_DEBUG_SHOW")) NSLog(@"tick: total=%@ needsInput=%ld working=%ld rows=%lu", c[@"total"], (long)ni, (long)wk, (unsigned long)self.hud.rows.count);
             self.item.button.contentTintColor = ni ? NSColor.systemYellowColor : nil;
         });
     }] resume];

@@ -41,6 +41,7 @@ const summaries = new Map<string, Summary>();
 let live = new Map<string, LiveAgent>();
 let liveUpdatedAt = 0;
 let liveError: string | undefined;
+let hooksReceived = 0; let lastHook: { event?: string; session?: string; at?: string } = {};
 
 // ---------- persistence ----------
 const INDEX_PATH = join(DATA_DIR, "index.json");
@@ -245,6 +246,7 @@ Last assistant reply (tail): ${(s.lastAssistantText ?? "").slice(-1800)}`;
 // ---------- hooks ----------
 function applyHook(h: any) {
   const id = h.session_id; if (!id) return;
+  hooksReceived++; lastHook = { event: h.hook_event_name, session: String(id).slice(0, 8), at: new Date().toISOString() };
   let s = sessions.get(id);
   if (!s && h.transcript_path) { const p = h.transcript_path as string; s = { id, file: p, project: basename(join(p, "..")), turns: 0, agents: {}, offset: 0, size: 0, mtimeMs: 0, cwd: h.cwd }; sessions.set(id, s); }
   if (!s) return;
@@ -255,7 +257,7 @@ function applyHook(h: any) {
     case "Stop": s.hookStatus = "idle"; s.hookStatusAt = now; s.needsInput = undefined; if (h.last_assistant_message) { s.lastAssistantText = String(h.last_assistant_message).slice(-3000); s.lastAssistantAt = iso; } break;
     case "SubagentStart": if (h.agent_id) s.agents[h.agent_id] = { id: h.agent_id, type: h.agent_type ?? "?", description: (h.subagent_prompt ?? h.description ?? "").slice(0, 160), startedAt: iso, status: "running", source: "hook" }; break;
     case "SubagentStop": if (h.agent_id) { const a = s.agents[h.agent_id] ?? { id: h.agent_id, type: h.agent_type ?? "?", description: "", source: "hook" as const, status: "done" as const }; a.status = "done"; a.endedAt = iso; a.source = "hook"; s.agents[h.agent_id] = a; } break;
-    case "Notification": if (["permission_prompt", "idle_prompt", "agent_needs_input", "elicitation_dialog"].includes(h.notification_type)) s.needsInput = { type: h.notification_type, message: h.message, at: now }; break;
+    case "Notification": if (["permission_prompt", "agent_needs_input", "elicitation_dialog"].includes(h.notification_type)) s.needsInput = { type: h.notification_type, message: h.message, at: now }; break; // idle_prompt is just "waiting for your next prompt", not a blocker
     case "SessionStart": s.hookStatus = "idle"; s.hookStatusAt = now; break;
     case "SessionEnd": s.hookStatus = undefined; s.needsInput = undefined; break;
   }
@@ -275,8 +277,10 @@ function view() {
     const running = agents.filter((a) => a.status === "running").length;
     const hookFresh = s.hookStatusAt && now - s.hookStatusAt < 6 * 3600_000;
     const alive = !!lv && (lv.kind === "interactive" || (lv.kind === "background" && lv.state !== "done" && lv.state !== "failed" && lv.state !== "stopped"));
+    // a hook-reported needs-input flag is stale once the process reports busy without waitingFor, or after 30 min
+    const needsInput = !!s.needsInput && alive && !(lv?.status === "busy" && !lv?.waitingFor) && now - s.needsInput.at < 30 * 60_000;
     let state: string;
-    if (lv?.waitingFor || (s.needsInput && alive)) state = "needs_input";
+    if (lv?.waitingFor || needsInput) state = "needs_input";
     else if (lv?.status === "busy" || (alive && hookFresh && s.hookStatus === "busy") || (alive && running > 0)) state = "working";
     else if (alive) state = "idle";
     else if (lv?.state === "done") state = "bg_done";
@@ -318,7 +322,7 @@ Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
     const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json", "access-control-allow-origin": "*" } });
-    if (url.pathname === "/health") return json({ ok: true, sessions: sessions.size, liveUpdatedAt, liveError: liveError ?? null, summariesPending: summaryQueue.length + summarising });
+    if (url.pathname === "/health") return json({ ok: true, sessions: sessions.size, liveUpdatedAt, liveError: liveError ?? null, summariesPending: summaryQueue.length + summarising, hooksReceived, lastHook });
     if (url.pathname === "/sessions") return json(view());
     if (url.pathname === "/hook" && req.method === "POST") { try { applyHook(await req.json()); } catch (e) { return json({ ok: false }, 400); } return json({ ok: true }); }
     if (url.pathname === "/resummarise" && req.method === "POST") { const id = url.searchParams.get("id"); if (id) summaries.delete(id); else summaries.clear(); enqueueSummaries(); return json({ ok: true }); }
