@@ -23,6 +23,7 @@ type Session = {
   id: string; file: string; project: string; cwd?: string; gitBranch?: string; entrypoint?: string; version?: string;
   firstAt?: string; lastActivityAt?: string; lastUserAt?: string; lastAssistantAt?: string;
   firstPrompt?: string; lastPrompt?: string; leafUuid?: string; lastAssistantText?: string;
+  prompts?: string[]; replies?: string[]; // digest for the summariser: every real user prompt (capped), last few assistant texts
   aiTitle?: string; customTitle?: string; agentName?: string;
   turns: number; costUSD?: number; continuedIn?: string;
   pendingBackgroundAgents?: number;
@@ -33,7 +34,9 @@ type Session = {
   hookStatus?: "busy" | "idle"; hookStatusAt?: number;
   needsInput?: { type: string; message?: string; at: number };
 };
-type Summary = { leaf: string; title: string; leftOff: string; at: string };
+type Summary = { leaf: string; title: string; about?: string; leftOff: string; at: string; v?: number };
+const SUMMARY_VERSION = 2; // bump to regenerate every cached summary
+const INDEX_VERSION = 2;   // bump to force a full re-parse of transcripts (new fields)
 type LiveAgent = { pid?: number; id?: string; cwd?: string; kind?: string; startedAt?: number; sessionId: string; name?: string; status?: string; state?: string; waitingFor?: string };
 
 const sessions = new Map<string, Session>();
@@ -47,14 +50,18 @@ let hooksReceived = 0; let lastHook: { event?: string; session?: string; at?: st
 const INDEX_PATH = join(DATA_DIR, "index.json");
 const SUMMARIES_PATH = join(DATA_DIR, "summaries.json");
 function loadCache() {
-  try { for (const s of JSON.parse(readFileSync(INDEX_PATH, "utf8")) as Session[]) sessions.set(s.id, { ...s, agents: s.agents ?? {} }); } catch {}
+  try {
+    const raw = JSON.parse(readFileSync(INDEX_PATH, "utf8"));
+    const list: Session[] = Array.isArray(raw) ? [] : raw.version === INDEX_VERSION ? raw.sessions : [];
+    for (const s of list) sessions.set(s.id, { ...s, agents: s.agents ?? {} });
+  } catch {}
   try { for (const [k, v] of Object.entries(JSON.parse(readFileSync(SUMMARIES_PATH, "utf8")))) summaries.set(k, v as Summary); } catch {}
 }
 let saveTimer: Timer | undefined;
 function scheduleSave() {
   clearTimeout(saveTimer);
   saveTimer = setTimeout(() => {
-    try { writeFileSync(INDEX_PATH, JSON.stringify([...sessions.values()])); } catch (e) { console.error("save index", e); }
+    try { writeFileSync(INDEX_PATH, JSON.stringify({ version: INDEX_VERSION, sessions: [...sessions.values()] })); } catch (e) { console.error("save index", e); }
     try { writeFileSync(SUMMARIES_PATH, JSON.stringify(Object.fromEntries(summaries))); } catch (e) { console.error("save summaries", e); }
   }, 500);
 }
@@ -74,6 +81,20 @@ function isRealPrompt(rec: any): boolean {
   if (t.startsWith("<local-command") || t.startsWith("<command-name>") || t.startsWith("<task-notification>") || t.startsWith("<system-reminder>")) return false;
   return true;
 }
+function isNoisePrompt(t: string): boolean {
+  const x = t.trim();
+  return !x || x.startsWith("<task-notification>") || x.startsWith("[Request interrupted") || x.startsWith("<local-command") || x.startsWith("<command-name>") || x.startsWith("<system-reminder>") || /^(ok|okay|yes|no|continue|go|go ahead|sorry continue|thanks|resume)\.?$/i.test(x);
+}
+function pushPrompt(s: Session, p: string) {
+  s.prompts ??= [];
+  s.prompts.push(p.slice(0, 220));
+  if (s.prompts.length > 70) s.prompts.splice(15, s.prompts.length - 70); // keep the first 15 and the most recent 55
+}
+function pushReply(s: Session, t: string) {
+  s.replies ??= [];
+  s.replies.push(t.length > 1500 ? t.slice(0, 500) + " […] " + t.slice(-1000) : t);
+  if (s.replies.length > 3) s.replies.splice(0, s.replies.length - 3);
+}
 function cleanPrompt(t: string): string {
   return t.replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, "").replace(/\s+/g, " ").trim().slice(0, 400);
 }
@@ -92,13 +113,13 @@ function parseSlice(s: Session, text: string) {
       case "user":
         if (isRealPrompt(d)) {
           const p = cleanPrompt(textOf(d.message?.content));
-          if (p) { s.turns++; s.lastPrompt = p; s.lastUserAt = d.timestamp; if (!s.firstPrompt) s.firstPrompt = p; s.hookStatus = undefined; s.needsInput = undefined; }
+          if (p && !isNoisePrompt(p)) { s.turns++; s.lastPrompt = p; s.lastUserAt = d.timestamp; if (!s.firstPrompt) s.firstPrompt = p; pushPrompt(s, p); s.hookStatus = undefined; s.needsInput = undefined; }
         }
         break;
       case "assistant": {
         if (d.isSidechain) break;
         const txt = textOf(d.message?.content).trim();
-        if (txt) { s.lastAssistantText = txt.slice(-3000); s.lastAssistantAt = d.timestamp; }
+        if (txt) { s.lastAssistantText = txt.slice(-3000); s.lastAssistantAt = d.timestamp; if (txt.length > 80) pushReply(s, txt); }
         break;
       }
       case "ai-title": if (d.aiTitle) s.aiTitle = d.aiTitle; break;
@@ -126,7 +147,7 @@ function indexFile(project: string, file: string): boolean {
   s.file = file; s.project = project;
   if (st.size === s.size && st.mtimeMs === s.mtimeMs) return false;
   if (st.size < s.offset) { // rewritten: start over
-    Object.assign(s, { turns: 0, offset: 0, firstAt: undefined, lastActivityAt: undefined, firstPrompt: undefined, lastPrompt: undefined, lastAssistantText: undefined });
+    Object.assign(s, { turns: 0, offset: 0, firstAt: undefined, lastActivityAt: undefined, firstPrompt: undefined, lastPrompt: undefined, lastAssistantText: undefined, prompts: [], replies: [] });
   }
   const buf = readFileSync(file);
   let end = buf.length;
@@ -203,7 +224,7 @@ function needsSummary(s: Session): boolean {
   if (s.entrypoint && s.entrypoint !== "cli") return false; // automated (-p, cron) sessions keep their first-prompt title
   if (s.lastActivityAt && Date.now() - Date.parse(s.lastActivityAt) > SUMMARY_DAYS * 86_400_000) return false;
   const leaf = summaryLeaf(s); const cur = summaries.get(s.id);
-  return !cur || cur.leaf !== leaf;
+  return !cur || cur.leaf !== leaf || cur.v !== SUMMARY_VERSION;
 }
 function summaryLeaf(s: Session) { return `${s.turns}:${s.lastAssistantAt ?? ""}:${(s.lastAssistantText ?? "").length}`; }
 function enqueueSummaries() {
@@ -222,24 +243,36 @@ async function pumpSummaries() {
 }
 async function summarise(s: Session) {
   const leaf = summaryLeaf(s);
-  const hint = s.customTitle ?? s.aiTitle ?? s.firstPrompt ?? "";
-  const prompt = `Summarise a Claude Code session for a heads-up display.
-Return ONLY compact JSON: {"title": "<5 to 8 words, the session's overall theme, Title Case, no trailing period>", "leftOff": "<one sentence, present tense, what was just delivered or what is still pending>"}.
-Never use em-dashes. Do not repeat the hint verbatim if it is longer than 8 words.
+  const hint = s.customTitle ?? s.aiTitle ?? "";
+  const prompts = (s.prompts?.length ? s.prompts : [s.firstPrompt, s.lastPrompt].filter(Boolean) as string[]);
+  const promptList = prompts.map((p, i) => `${i + 1}. ${p}`).join("\n");
+  const replies = (s.replies?.length ? s.replies : [s.lastAssistantText ?? ""]).map((r, i, a) => `--- reply ${a.length - i === 1 ? "(most recent)" : `(${a.length - i} back)`} ---\n${r}`).join("\n");
+  const span = s.firstAt && s.lastActivityAt ? `${s.firstAt.slice(0, 16)} to ${s.lastActivityAt.slice(0, 16)}` : "";
+  const prompt = `You write the row for one Claude Code session in a heads-up display the user scans when returning to work, sometimes a day later.
+The user typed ${prompts.length} prompts over ${span || "the session"}. Read ALL of them: the title and "about" must describe the whole session's work, not just the latest prompt.
 
-Hint title (from the first prompt, may be stale): ${hint}
-First prompt: ${(s.firstPrompt ?? "").slice(0, 600)}
-Last user prompt: ${(s.lastPrompt ?? "").slice(0, 800)}
-Last assistant reply (tail): ${(s.lastAssistantText ?? "").slice(-1800)}`;
+Return ONLY compact JSON with three fields:
+"title": 4 to 7 words, Title Case, the session's overall subject (the thing being built, decided, researched or written). Not the latest tweak.
+"about": one sentence, max 22 words, plain past tense, what the session accomplished across its arc.
+"leftOff": one or two sentences, max 40 words. First what the last exchange delivered, then what is still open: waiting on the user, a next step named in the last reply, or nothing pending. Be concrete: name the artifact, decision or question.
+
+Rules: no em-dashes, no marketing words, no "the user"; write as a colleague's note. If the hint title is a short code name the user chose (like "TMO"), you may reuse it inside the title but still make the title descriptive.
+${hint ? `Hint title (may be stale or a code name): ${hint}\n` : ""}
+USER PROMPTS IN ORDER:
+${promptList}
+
+LAST ASSISTANT REPLIES:
+${replies}`;
   const proc = Bun.spawn(["claude", "-p", "--model", SUMMARY_MODEL, "--no-session-persistence", "--setting-sources", "", "--tools", "", "--system-prompt", "You output only compact JSON. No prose, no code fences.", "--output-format", "json", prompt],
     { stdout: "pipe", stderr: "pipe", cwd: DATA_DIR, env: { ...process.env, CLAUDECODE: undefined as any } });
   const out = await new Response(proc.stdout).text(); await proc.exited;
   let result = ""; try { result = JSON.parse(out).result ?? ""; } catch { result = out; }
   const m = result.match(/\{[\s\S]*\}/); if (!m) throw new Error("no JSON in summary: " + result.slice(0, 120));
   const j = JSON.parse(m[0]);
-  const title = String(j.title ?? "").replace(/[—–]/g, "-").trim(); const leftOff = String(j.leftOff ?? "").replace(/[—–]/g, "-").trim();
+  const fix = (x: unknown) => String(x ?? "").replace(/[—–]/g, "-").replace(/\s+/g, " ").trim();
+  const title = fix(j.title), about = fix(j.about), leftOff = fix(j.leftOff);
   if (!title) throw new Error("empty title");
-  summaries.set(s.id, { leaf, title, leftOff, at: new Date().toISOString() });
+  summaries.set(s.id, { leaf, title, about, leftOff, at: new Date().toISOString(), v: SUMMARY_VERSION });
   scheduleSave();
 }
 
@@ -253,7 +286,7 @@ function applyHook(h: any) {
   const now = Date.now(); const iso = new Date(now).toISOString();
   s.lastActivityAt = iso;
   switch (h.hook_event_name) {
-    case "UserPromptSubmit": s.hookStatus = "busy"; s.hookStatusAt = now; s.needsInput = undefined; if (h.prompt) { s.lastPrompt = cleanPrompt(h.prompt); s.lastUserAt = iso; } break;
+    case "UserPromptSubmit": { s.hookStatus = "busy"; s.hookStatusAt = now; s.needsInput = undefined; const p = h.prompt ? cleanPrompt(String(h.prompt)) : ""; if (p && !isNoisePrompt(p)) { s.lastPrompt = p; s.lastUserAt = iso; } break; }
     case "Stop": s.hookStatus = "idle"; s.hookStatusAt = now; s.needsInput = undefined; if (h.last_assistant_message) { s.lastAssistantText = String(h.last_assistant_message).slice(-3000); s.lastAssistantAt = iso; } break;
     case "SubagentStart": if (h.agent_id) s.agents[h.agent_id] = { id: h.agent_id, type: h.agent_type ?? "?", description: (h.subagent_prompt ?? h.description ?? "").slice(0, 160), startedAt: iso, status: "running", source: "hook" }; break;
     case "SubagentStop": if (h.agent_id) { const a = s.agents[h.agent_id] ?? { id: h.agent_id, type: h.agent_type ?? "?", description: "", source: "hook" as const, status: "done" as const }; a.status = "done"; a.endedAt = iso; a.source = "hook"; s.agents[h.agent_id] = a; } break;
@@ -290,7 +323,7 @@ function view() {
     const resume = shortBg && alive ? `claude attach ${shortBg}` : `claude --resume ${s.id}`;
     const automated = s.turns === 0 || (s.entrypoint && s.entrypoint !== "cli");
     return {
-      id: s.id, shortId: s.id.slice(0, 8), title, titleSource, leftOff: sum?.leftOff ?? null,
+      id: s.id, shortId: s.id.slice(0, 8), title, titleSource, about: sum?.about ?? null, leftOff: sum?.leftOff ?? null,
       lastActivityAt: s.lastActivityAt ?? s.firstAt ?? new Date(s.mtimeMs || 0).toISOString(), firstAt: s.firstAt ?? null, lastPrompt: s.lastPrompt ?? null,
       project: s.cwd ? basename(s.cwd) : s.project, cwd: s.cwd ?? null, gitBranch: s.gitBranch ?? null,
       state, alive, needsInput: s.needsInput?.message ?? lv?.waitingFor ?? null,

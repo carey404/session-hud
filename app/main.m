@@ -5,7 +5,7 @@
 
 static NSString *const kServer = @"http://127.0.0.1:4243";
 static NSString *const kServerDir = @"~/Development/session-hud";
-static const CGFloat kRowHeight = 78;
+static const CGFloat kRowHeight = 100;
 static const CGFloat kWidth = 500;
 
 // ---------- helpers ----------
@@ -111,7 +111,7 @@ static NSImage *robotIcon(void) {
 
 // ---------- row view ----------
 @interface RowView : NSTableCellView
-@property NSTextField *dot, *title, *leftOff, *meta, *agents;
+@property NSTextField *dot, *title, *about, *leftOff, *meta, *agents;
 @property NSButton *resumeBtn, *btnCopy;
 @property NSDictionary *row;
 @end
@@ -120,12 +120,13 @@ static NSImage *robotIcon(void) {
     if ((self = [super initWithFrame:fr])) {
         _dot = label(11, NSFontWeightBold, NSColor.labelColor); _dot.stringValue = @"●";
         _title = label(13, NSFontWeightSemibold, NSColor.labelColor);
-        _leftOff = label(11.5, NSFontWeightRegular, NSColor.secondaryLabelColor); _leftOff.maximumNumberOfLines = 2; _leftOff.lineBreakMode = NSLineBreakByWordWrapping;
+        _about = label(11.5, NSFontWeightRegular, NSColor.secondaryLabelColor);
+        _leftOff = label(11.5, NSFontWeightRegular, NSColor.labelColor); _leftOff.maximumNumberOfLines = 2; _leftOff.lineBreakMode = NSLineBreakByWordWrapping;
         _meta = label(10.5, NSFontWeightRegular, NSColor.tertiaryLabelColor);
         _agents = label(10.5, NSFontWeightMedium, NSColor.systemOrangeColor); _agents.alignment = NSTextAlignmentRight;
         _resumeBtn = [NSButton buttonWithTitle:@"Resume" target:self action:@selector(resume:)]; _resumeBtn.bezelStyle = NSBezelStyleRounded; _resumeBtn.controlSize = NSControlSizeSmall; _resumeBtn.font = [NSFont systemFontOfSize:11];
         _btnCopy = [NSButton buttonWithTitle:@"Copy" target:self action:@selector(doCopy:)]; _btnCopy.bezelStyle = NSBezelStyleRounded; _btnCopy.controlSize = NSControlSizeSmall; _btnCopy.font = [NSFont systemFontOfSize:11];
-        for (NSView *v in @[_dot, _title, _leftOff, _meta, _agents, _resumeBtn, _btnCopy]) [self addSubview:v];
+        for (NSView *v in @[_dot, _title, _about, _leftOff, _meta, _agents, _resumeBtn, _btnCopy]) [self addSubview:v];
     }
     return self;
 }
@@ -138,7 +139,8 @@ static NSImage *robotIcon(void) {
     _dot.frame = NSMakeRect(x, H - 27, 14, 16);
     CGFloat titleRight = _resumeBtn.frame.origin.x - 8;
     _title.frame = NSMakeRect(x + 16, H - 28, titleRight - (x + 16), 18);
-    _leftOff.frame = NSMakeRect(x + 16, H - 58, right - (x + 16), 30);
+    _about.frame = NSMakeRect(x + 16, H - 45, right - (x + 16), 16);
+    _leftOff.frame = NSMakeRect(x + 16, H - 79, right - (x + 16), 32);
     CGFloat aw = _agents.stringValue.length ? 190 : 0;
     _agents.frame = NSMakeRect(right - aw, 6, aw, 14);
     _meta.frame = NSMakeRect(x + 16, 6, right - aw - (x + 16) - 6, 14);
@@ -148,9 +150,10 @@ static NSImage *robotIcon(void) {
     NSString *st = S(row[@"state"]);
     _dot.textColor = stateColor(st);
     _title.stringValue = S(row[@"title"]).length ? S(row[@"title"]) : @"(untitled)";
-    id lo = row[@"leftOff"]; NSString *lp = [row[@"lastPrompt"] isKindOfClass:NSString.class] ? row[@"lastPrompt"] : @"";
-    _leftOff.stringValue = [lo isKindOfClass:NSString.class] && [lo length] ? lo : (lp.length ? [@"Last prompt: " stringByAppendingString:lp] : @"");
-    _leftOff.textColor = ([lo isKindOfClass:NSString.class] && [lo length]) ? NSColor.secondaryLabelColor : NSColor.tertiaryLabelColor;
+    NSString *lo = S(row[@"leftOff"]), *ab = S(row[@"about"]), *lp = S(row[@"lastPrompt"]);
+    _about.stringValue = ab;
+    if (lo.length) { _leftOff.stringValue = [@"Left off: " stringByAppendingString:lo]; _leftOff.textColor = NSColor.labelColor; }
+    else { _leftOff.stringValue = lp.length ? [@"Last prompt: " stringByAppendingString:lp] : @""; _leftOff.textColor = NSColor.tertiaryLabelColor; }
     NSString *ni = [row[@"needsInput"] isKindOfClass:NSString.class] ? row[@"needsInput"] : nil;
     NSMutableArray *parts = [NSMutableArray arrayWithObjects:stateLabel(st), relTime(row[@"lastActivityAt"]), nil];
     if ([row[@"project"] isKindOfClass:NSString.class]) [parts addObject:row[@"project"]];
@@ -371,7 +374,7 @@ static OSStatus hotKeyHandler(EventHandlerCallRef next, EventRef event, void *us
     _item.button.target = self; _item.button.action = @selector(toggle:);
     [_item.button sendActionOn:NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp];
     _hud = [HUDController new];
-    _popover = [NSPopover new]; _popover.contentViewController = _hud; _popover.contentSize = NSMakeSize(kWidth, 600); _popover.behavior = NSPopoverBehaviorTransient; _popover.delegate = self; _popover.animates = NO;
+    _popover = [NSPopover new]; _popover.contentViewController = _hud; _popover.contentSize = NSMakeSize(kWidth, 660); _popover.behavior = NSPopoverBehaviorTransient; _popover.delegate = self; _popover.animates = NO;
     [self tick]; _timer = [NSTimer scheduledTimerWithTimeInterval:2 target:self selector:@selector(tick) userInfo:nil repeats:YES];
     [self registerHotkey];
     if (getenv("HUD_DEBUG_DETACH")) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [self toggleDetach:nil]; });
