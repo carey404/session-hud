@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync, copyFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 const SETTINGS = join(homedir(), ".claude", "settings.json");
-const CMD = "$HOME/Development/session-hud/scripts/hud-hook.sh";
+const CMD = join(import.meta.dir, "hud-hook.sh"); // absolute path of this checkout
 const EVENTS = ["UserPromptSubmit", "Stop", "SubagentStart", "SubagentStop", "SessionStart", "SessionEnd", "Notification"];
 const remove = process.argv.includes("--remove");
 const raw = readFileSync(SETTINGS, "utf8");
@@ -14,7 +14,7 @@ settings.hooks ??= {};
 let changes = 0;
 for (const ev of EVENTS) {
   const list: any[] = settings.hooks[ev] ?? [];
-  const isOurs = (g: any) => Array.isArray(g?.hooks) && g.hooks.some((h: any) => typeof h?.command === "string" && h.command.includes("session-hud/scripts/hud-hook.sh"));
+  const isOurs = (g: any) => Array.isArray(g?.hooks) && g.hooks.some((h: any) => typeof h?.command === "string" && h.command.endsWith("/hud-hook.sh"));
   const filtered = list.filter((g) => !isOurs(g));
   if (filtered.length !== list.length) changes++;
   if (!remove) { filtered.push({ hooks: [{ type: "command", command: CMD, timeout: 2, async: true }] }); changes++; }

@@ -266,7 +266,7 @@ Return ONLY compact JSON with three fields:
 "about": one sentence, max 22 words, plain past tense, what the session accomplished across its arc.
 "leftOff": one or two sentences, max 40 words. First what the last exchange delivered, then what is still open: waiting on the user, a next step named in the last reply, or nothing pending. Be concrete: name the artifact, decision or question.
 
-Rules: no em-dashes, no marketing words, no "the user"; write as a colleague's note. If the hint title is a short code name the user chose (like "TMO"), you may reuse it inside the title but still make the title descriptive.
+Rules: no em-dashes, no marketing words, no "the user"; write as a colleague's note. If the hint title is a short code name the user chose (like "MBR"), you may reuse it inside the title but still make the title descriptive.
 ${hint ? `Hint title (may be stale or a code name): ${inert(hint)}\n` : ""}
 USER PROMPTS IN ORDER:
 ${promptList}

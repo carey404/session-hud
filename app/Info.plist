@@ -3,7 +3,7 @@
 <plist version="1.0"><dict>
   <key>CFBundleName</key><string>SessionHUD</string>
   <key>CFBundleDisplayName</key><string>Session HUD</string>
-  <key>CFBundleIdentifier</key><string>com.mikecarey.SessionHUD</string>
+  <key>CFBundleIdentifier</key><string>com.sessionhud.app</string>
   <key>CFBundleExecutable</key><string>SessionHUD</string>
   <key>CFBundleVersion</key><string>0.1.0</string>
   <key>CFBundleShortVersionString</key><string>0.1.0</string>

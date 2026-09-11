@@ -4,7 +4,13 @@
 #import <Carbon/Carbon.h>
 
 static NSString *const kServer = @"http://127.0.0.1:4243";
-static NSString *const kServerDir = @"~/Development/session-hud";
+// Repo root = <repo>/app/build/SessionHUD.app -> three levels up from the bundle. Override with `defaults write com.sessionhud.app serverDir <path>`.
+static NSString *serverDir(void) {
+    NSString *o = [[NSUserDefaults standardUserDefaults] stringForKey:@"serverDir"]; if (o.length) return o.stringByExpandingTildeInPath;
+    NSString *b = [NSBundle mainBundle].bundlePath;
+    NSString *root = b.stringByDeletingLastPathComponent.stringByDeletingLastPathComponent.stringByDeletingLastPathComponent;
+    return [[NSFileManager defaultManager] fileExistsAtPath:[root stringByAppendingPathComponent:@"server/index.ts"]] ? root : [@"~/Development/session-hud" stringByExpandingTildeInPath];
+}
 static const CGFloat kWidth = 560, kHeight = 680, kRowHeight = 108, kGroupHeight = 30;
 
 // ---------- helpers ----------
@@ -94,6 +100,10 @@ static NSImage *robotIcon(void) {
 }
 
 // ---------- terminal launching ----------
+static BOOL warpInstalled(void) {
+    for (NSString *p in @[@"/Applications/Warp.app", [@"~/Applications/Warp.app" stringByExpandingTildeInPath]]) if ([[NSFileManager defaultManager] fileExistsAtPath:p]) return YES;
+    return NO;
+}
 @interface Launcher : NSObject
 + (void)runCommand:(NSString *)cmd cwd:(NSString *)cwd title:(NSString *)title;
 + (void)resume:(NSDictionary *)row fork:(BOOL)fork;
@@ -107,7 +117,7 @@ static NSImage *robotIcon(void) {
     [self runCommand:cmd cwd:cwd title:S(row[@"title"])];
 }
 + (void)runCommand:(NSString *)cmd cwd:(NSString *)cwd title:(NSString *)title {
-    NSString *term = [[NSUserDefaults standardUserDefaults] stringForKey:@"terminal"] ?: @"warp";
+    NSString *term = [[NSUserDefaults standardUserDefaults] stringForKey:@"terminal"] ?: (warpInstalled() ? @"warp" : @"terminal");
     NSString *full = [NSString stringWithFormat:@"cd %@ && %@", [self shellQuote:cwd], cmd];
     if ([term isEqualToString:@"warp"]) {
         NSString *dir = [@"~/.warp/launch_configurations" stringByExpandingTildeInPath];
@@ -501,7 +511,7 @@ static OSStatus hotKeyHandler(EventHandlerCallRef next, EventRef event, void *us
     NSEvent *e = s ? NSApp.currentEvent : nil;
     if (e.type == NSEventTypeRightMouseUp) {
         NSMenu *m = [NSMenu new];
-        NSString *term = [[NSUserDefaults standardUserDefaults] stringForKey:@"terminal"] ?: @"warp";
+        NSString *term = [[NSUserDefaults standardUserDefaults] stringForKey:@"terminal"] ?: (warpInstalled() ? @"warp" : @"terminal");
         NSMenuItem *w = [m addItemWithTitle:@"Resume in Warp" action:@selector(useWarp:) keyEquivalent:@""]; w.state = [term isEqualToString:@"warp"];
         NSMenuItem *t = [m addItemWithTitle:@"Resume in Terminal.app" action:@selector(useTerminal:) keyEquivalent:@""]; t.state = [term isEqualToString:@"terminal"];
         [m addItem:NSMenuItem.separatorItem];
@@ -543,7 +553,7 @@ static OSStatus hotKeyHandler(EventHandlerCallRef next, EventRef event, void *us
     if (_lastServerStart && -[_lastServerStart timeIntervalSinceNow] < 20) return;
     _lastServerStart = [NSDate date];
     NSTask *t = [NSTask new]; t.launchPath = @"/bin/zsh";
-    t.arguments = @[@"-lc", [NSString stringWithFormat:@"cd %@ && mkdir -p data && nohup bun run server/index.ts >> data/server.log 2>&1 &", [kServerDir stringByExpandingTildeInPath]]];
+    t.arguments = @[@"-lc", [NSString stringWithFormat:@"cd %@ && mkdir -p data && nohup bun run server/index.ts >> data/server.log 2>&1 &", serverDir()]];
     [t launch];
 }
 - (BOOL)applicationSupportsSecureRestorableState:(NSApplication *)app { return YES; }
