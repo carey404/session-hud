@@ -55,6 +55,29 @@ static NSTextField *label(CGFloat size, NSFontWeight w, NSColor *c) {
     return t;
 }
 
+// ---------- menubar robot icon (vector template image; tinted via contentTintColor) ----------
+static NSImage *robotIcon(void) {
+    NSImage *img = [NSImage imageWithSize:NSMakeSize(18, 17) flipped:NO drawingHandler:^BOOL(NSRect r) {
+        [NSColor.blackColor setFill];
+        // antenna
+        NSBezierPath *ant = [NSBezierPath bezierPath]; ant.lineWidth = 1.4; [ant moveToPoint:NSMakePoint(9, 12.6)]; [ant lineToPoint:NSMakePoint(9, 14.6)]; [NSColor.blackColor setStroke]; [ant stroke];
+        [[NSBezierPath bezierPathWithOvalInRect:NSMakeRect(7.7, 14.2, 2.6, 2.6)] fill];
+        // ears
+        [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(0.6, 5.2, 2.2, 4.4) xRadius:0.8 yRadius:0.8] fill];
+        [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(15.2, 5.2, 2.2, 4.4) xRadius:0.8 yRadius:0.8] fill];
+        // head
+        [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(2.4, 1.4, 13.2, 11.4) xRadius:3.2 yRadius:3.2] fill];
+        // cut-outs: eyes and mouth grille (transparent so the menubar shows through)
+        [[NSGraphicsContext currentContext] setCompositingOperation:NSCompositingOperationDestinationOut];
+        [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(4.9, 6.6, 3.0, 3.4) xRadius:1.1 yRadius:1.1] fill];
+        [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(10.1, 6.6, 3.0, 3.4) xRadius:1.1 yRadius:1.1] fill];
+        for (int i = 0; i < 3; i++) [[NSBezierPath bezierPathWithRoundedRect:NSMakeRect(5.2 + i * 2.7, 3.2, 2.1, 1.7) xRadius:0.5 yRadius:0.5] fill];
+        return YES;
+    }];
+    img.template = YES;
+    return img;
+}
+
 // ---------- terminal launching ----------
 @interface Launcher : NSObject
 + (void)resume:(NSDictionary *)row;
@@ -343,7 +366,7 @@ static OSStatus hotKeyHandler(EventHandlerCallRef next, EventRef event, void *us
 }
 - (void)applicationDidFinishLaunching:(NSNotification *)n {
     _item = [[NSStatusBar systemStatusBar] statusItemWithLength:NSVariableStatusItemLength];
-    _item.button.image = [NSImage imageWithSystemSymbolName:@"rectangle.stack" accessibilityDescription:@"Session HUD"];
+    _item.button.image = robotIcon(); _item.button.image.accessibilityDescription = @"Session HUD";
     _item.button.imagePosition = NSImageLeft; _item.button.font = [NSFont monospacedDigitSystemFontOfSize:12 weight:NSFontWeightMedium];
     _item.button.target = self; _item.button.action = @selector(toggle:);
     [_item.button sendActionOn:NSEventMaskLeftMouseUp | NSEventMaskRightMouseUp];
@@ -392,7 +415,7 @@ static OSStatus hotKeyHandler(EventHandlerCallRef next, EventRef event, void *us
             if (wk) [t appendFormat:@" %ld", (long)wk];
             self.item.button.title = t;
             if (getenv("HUD_DEBUG_SHOW")) NSLog(@"tick: total=%@ needsInput=%ld working=%ld rows=%lu", c[@"total"], (long)ni, (long)wk, (unsigned long)self.hud.rows.count);
-            self.item.button.contentTintColor = ni ? NSColor.systemYellowColor : nil;
+            self.item.button.contentTintColor = ni ? NSColor.systemOrangeColor : nil; // robot turns orange when a session needs you
         });
     }] resume];
 }
