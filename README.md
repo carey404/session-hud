@@ -7,6 +7,8 @@ macOS menubar HUD of every Claude Code session on this machine: thematic title, 
 - `scripts/install-hooks.ts`: adds async hooks to `~/.claude/settings.json` that POST to the server (`--remove` to undo). `scripts/hud-hook.sh` is the bridge.
 - `scripts/install-launch-agent.sh`: optional launch at login.
 
+Design v2 (2026-09-11): rows are grouped by state and recency (Needs input, Working, Open, Today, Yesterday, This week, Earlier); actions appear on hover or selection only; a search field filters the whole history by title, summary, prompt or project (`/` or ⌘F from the list, arrow down to return); right-click a row for resume, fork, copy command, copy id, reveal transcript. The detached panel uses the translucent HUD material. `app/main.v1.m` is the pre-revamp shell.
+
 Right-click the menubar icon: choose Warp or Terminal.app for resume, detach or reattach, regenerate titles, quit. Keys in the popover: enter resume, c copy, j/k move, esc close.
 
 Global hotkey ⌃⌥H toggles the HUD (popover, or the floating panel once detached). Override with
