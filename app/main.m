@@ -6,7 +6,7 @@
 static NSString *const kServer = @"http://127.0.0.1:4243";
 static NSString *const kServerDir = @"~/Development/session-hud";
 static const CGFloat kRowHeight = 100;
-static const CGFloat kWidth = 500;
+static const CGFloat kWidth = 560;
 
 // ---------- helpers ----------
 static NSString *S(id v) { return [v isKindOfClass:NSString.class] ? v : @""; } // JSON null arrives as NSNull

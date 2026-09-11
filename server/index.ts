@@ -85,14 +85,16 @@ function isNoisePrompt(t: string): boolean {
   const x = t.trim();
   return !x || x.startsWith("<task-notification>") || x.startsWith("[Request interrupted") || x.startsWith("<local-command") || x.startsWith("<command-name>") || x.startsWith("<system-reminder>") || /^(ok|okay|yes|no|continue|go|go ahead|sorry continue|thanks|resume)\.?$/i.test(x);
 }
+// claude -p expands @path mentions and treats leading slashes as commands; neutralise both so quoted prompts stay inert text
+function inert(t: string): string { return t.replace(/@/g, "＠").replace(/^\//, "／"); }
 function pushPrompt(s: Session, p: string) {
   s.prompts ??= [];
-  s.prompts.push(p.slice(0, 220));
+  s.prompts.push(inert(p).slice(0, 220));
   if (s.prompts.length > 70) s.prompts.splice(15, s.prompts.length - 70); // keep the first 15 and the most recent 55
 }
 function pushReply(s: Session, t: string) {
   s.replies ??= [];
-  s.replies.push(t.length > 1500 ? t.slice(0, 500) + " […] " + t.slice(-1000) : t);
+  s.replies.push(inert(t.length > 1500 ? t.slice(0, 500) + " […] " + t.slice(-1000) : t));
   if (s.replies.length > 3) s.replies.splice(0, s.replies.length - 3);
 }
 function cleanPrompt(t: string): string {
@@ -207,7 +209,7 @@ function fullScan(): number {
 // ---------- live processes via `claude agents --json` ----------
 async function pollLive() {
   try {
-    const proc = Bun.spawn(["claude", "agents", "--json", "--all"], { stdout: "pipe", stderr: "pipe", env: { ...process.env, CLAUDECODE: undefined as any } });
+    const proc = Bun.spawn(["claude", "agents", "--json", "--all"], { stdout: "pipe", stderr: "pipe", env: summariserEnv() });
     const out = await new Response(proc.stdout).text();
     await proc.exited;
     const arr = JSON.parse(out) as LiveAgent[];
@@ -218,6 +220,14 @@ async function pollLive() {
 }
 
 // ---------- summariser ----------
+// Clean environment for `claude -p`: drop every CLAUDE* variable inherited from a parent Claude Code session (a nested
+// session otherwise inherits its parent's context and hooks), and turn extended thinking off for this classification job.
+function summariserEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) if (v !== undefined && !k.startsWith("CLAUDE")) env[k] = v;
+  env.MAX_THINKING_TOKENS = process.env.HUD_SUMMARY_THINKING ?? "0";
+  return env;
+}
 const summaryQueue: string[] = []; let summarising = 0; const inQueue = new Set<string>();
 function needsSummary(s: Session): boolean {
   if (!SUMMARY_ENABLED || s.turns === 0 || !s.lastAssistantText) return false;
@@ -245,8 +255,8 @@ async function summarise(s: Session) {
   const leaf = summaryLeaf(s);
   const hint = s.customTitle ?? s.aiTitle ?? "";
   const prompts = (s.prompts?.length ? s.prompts : [s.firstPrompt, s.lastPrompt].filter(Boolean) as string[]);
-  const promptList = prompts.map((p, i) => `${i + 1}. ${p}`).join("\n");
-  const replies = (s.replies?.length ? s.replies : [s.lastAssistantText ?? ""]).map((r, i, a) => `--- reply ${a.length - i === 1 ? "(most recent)" : `(${a.length - i} back)`} ---\n${r}`).join("\n");
+  const promptList = prompts.map((p, i) => `${i + 1}. ${inert(p)}`).join("\n");
+  const replies = (s.replies?.length ? s.replies : [s.lastAssistantText ?? ""]).map((r) => inert(r)).map((r, i, a) => `--- reply ${a.length - i === 1 ? "(most recent)" : `(${a.length - i} back)`} ---\n${r}`).join("\n");
   const span = s.firstAt && s.lastActivityAt ? `${s.firstAt.slice(0, 16)} to ${s.lastActivityAt.slice(0, 16)}` : "";
   const prompt = `You write the row for one Claude Code session in a heads-up display the user scans when returning to work, sometimes a day later.
 The user typed ${prompts.length} prompts over ${span || "the session"}. Read ALL of them: the title and "about" must describe the whole session's work, not just the latest prompt.
@@ -257,16 +267,18 @@ Return ONLY compact JSON with three fields:
 "leftOff": one or two sentences, max 40 words. First what the last exchange delivered, then what is still open: waiting on the user, a next step named in the last reply, or nothing pending. Be concrete: name the artifact, decision or question.
 
 Rules: no em-dashes, no marketing words, no "the user"; write as a colleague's note. If the hint title is a short code name the user chose (like "TMO"), you may reuse it inside the title but still make the title descriptive.
-${hint ? `Hint title (may be stale or a code name): ${hint}\n` : ""}
+${hint ? `Hint title (may be stale or a code name): ${inert(hint)}\n` : ""}
 USER PROMPTS IN ORDER:
 ${promptList}
 
 LAST ASSISTANT REPLIES:
 ${replies}`;
-  const proc = Bun.spawn(["claude", "-p", "--model", SUMMARY_MODEL, "--no-session-persistence", "--setting-sources", "", "--tools", "", "--system-prompt", "You output only compact JSON. No prose, no code fences.", "--output-format", "json", prompt],
-    { stdout: "pipe", stderr: "pipe", cwd: DATA_DIR, env: { ...process.env, CLAUDECODE: undefined as any } });
+  const proc = Bun.spawn(["claude", "-p", "--model", SUMMARY_MODEL, "--effort", process.env.HUD_SUMMARY_EFFORT ?? "low", "--no-session-persistence", "--setting-sources", "", "--tools", "", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--system-prompt", "You output only compact JSON. No prose, no code fences.", "--output-format", "json", prompt],
+    { stdout: "pipe", stderr: "pipe", cwd: DATA_DIR, env: summariserEnv() });
   const out = await new Response(proc.stdout).text(); await proc.exited;
-  let result = ""; try { result = JSON.parse(out).result ?? ""; } catch { result = out; }
+  let result = ""; let meta: any = {}; try { meta = JSON.parse(out); result = meta.result ?? ""; } catch { result = out; }
+  const u = meta.usage ?? {};
+  console.log(`summary ${s.id.slice(0, 8)} in=${(u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)} cacheRead=${u.cache_read_input_tokens ?? 0} out=${u.output_tokens ?? 0} think=${u.output_tokens_details?.thinking_tokens ?? 0} cost=$${Number(meta.total_cost_usd ?? 0).toFixed(4)} api=${meta.duration_api_ms ?? "?"}ms`);
   const m = result.match(/\{[\s\S]*\}/); if (!m) throw new Error("no JSON in summary: " + result.slice(0, 120));
   const j = JSON.parse(m[0]);
   const fix = (x: unknown) => String(x ?? "").replace(/[—–]/g, "-").replace(/\s+/g, " ").trim();
