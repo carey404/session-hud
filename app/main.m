@@ -3,7 +3,8 @@
 #import <Cocoa/Cocoa.h>
 #import <Carbon/Carbon.h>
 
-static NSString *const kServer = @"http://127.0.0.1:4243";
+static NSString *serverURL(void) { const char *e = getenv("HUD_SERVER"); return e && *e ? [NSString stringWithUTF8String:e] : @"http://127.0.0.1:4243"; }
+#define kServer serverURL()
 // Repo root = <repo>/app/build/SessionHUD.app -> three levels up from the bundle. Override with `defaults write com.sessionhud.app serverDir <path>`.
 static NSString *serverDir(void) {
     NSString *o = [[NSUserDefaults standardUserDefaults] stringForKey:@"serverDir"]; if (o.length) return o.stringByExpandingTildeInPath;
@@ -394,6 +395,9 @@ static BOOL warpInstalled(void) {
     for (id it in items) { if ([it isKindOfClass:NSString.class]) { [withCounts addObject:@{@"group": it, @"n": counts[ci++]}]; } else [withCounts addObject:it]; }
     NSString *selId = nil; if (_table.selectedRow >= 0 && _table.selectedRow < (NSInteger)_items.count && ![_items[_table.selectedRow][@"group"] length]) selId = S(_items[_table.selectedRow][@"id"]);
     _items = withCounts; [_table reloadData];
+    static BOOL scrolled = NO; // screenshot helper: HUD_DEBUG_SCROLLTO=<group name> pins that group header to the top once
+    if (!scrolled && getenv("HUD_DEBUG_SCROLLTO")) { NSString *g = [NSString stringWithUTF8String:getenv("HUD_DEBUG_SCROLLTO")]; NSUInteger i = [_items indexOfObjectPassingTest:^BOOL(NSDictionary *r, NSUInteger idx, BOOL *stop) { return [S(r[@"group"]) isEqualToString:g]; }];
+        if (i != NSNotFound) { scrolled = YES; [_table scrollPoint:NSMakePoint(0, [_table rectOfRow:i].origin.y - 6)]; } }
     _empty.hidden = rows.count > 0; _empty.stringValue = searching ? @"No sessions match" : (seg == 0 ? @"Nothing active in the last 24 hours" : @"No sessions");
     if (selId.length) { NSUInteger i = [_items indexOfObjectPassingTest:^BOOL(NSDictionary *r, NSUInteger idx, BOOL *stop) { return [S(r[@"id"]) isEqualToString:selId]; }]; if (i != NSNotFound) [_table selectRowIndexes:[NSIndexSet indexSetWithIndex:i] byExtendingSelection:NO]; }
 }
@@ -455,7 +459,11 @@ static OSStatus hotKeyHandler(EventHandlerCallRef next, EventRef event, void *us
     return l;
 }
 - (void)hotkeyPressed { if (_panel) { if (_panel.isVisible && _panel.isKeyWindow) [_panel orderOut:nil]; else [self showPanel]; return; } [self toggle:nil]; }
-- (void)showPanel { [_panel makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES]; [_panel makeFirstResponder:_hud.table]; }
+- (void)showPanel {
+    if (getenv("HUD_DEBUG_ORIGIN")) { double x = 0, y = 0; sscanf(getenv("HUD_DEBUG_ORIGIN"), "%lf,%lf", &x, &y); [_panel setFrameOrigin:NSMakePoint(x, y)]; }
+    [_panel makeKeyAndOrderFront:nil]; [NSApp activateIgnoringOtherApps:YES]; [_panel makeFirstResponder:_hud.table];
+    if (getenv("HUD_DEBUG_DETACH")) NSLog(@"panel window=%ld scale=%.0f", (long)_panel.windowNumber, _panel.backingScaleFactor);
+}
 - (NSPanel *)makePanel {
     NSPanel *p = [[NSPanel alloc] initWithContentRect:NSMakeRect(0, 0, kWidth, kHeight)
         styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable | NSWindowStyleMaskResizable | NSWindowStyleMaskUtilityWindow | NSWindowStyleMaskNonactivatingPanel | NSWindowStyleMaskFullSizeContentView
@@ -504,6 +512,8 @@ static OSStatus hotKeyHandler(EventHandlerCallRef next, EventRef event, void *us
     _popover = [NSPopover new]; _popover.contentViewController = _hud; _popover.contentSize = NSMakeSize(kWidth, kHeight); _popover.behavior = NSPopoverBehaviorTransient; _popover.delegate = self; _popover.animates = NO;
     [self tick]; _timer = [NSTimer scheduledTimerWithTimeInterval:2 target:self selector:@selector(tick) userInfo:nil repeats:YES];
     [self registerHotkey];
+    if (getenv("HUD_DEBUG_FILTER")) { [_hud loadViewIfNeeded]; _hud.filter.selectedSegment = atoi(getenv("HUD_DEBUG_FILTER")); }
+    if (getenv("HUD_DEBUG_SEARCH")) { [_hud loadViewIfNeeded]; _hud.search.stringValue = [NSString stringWithUTF8String:getenv("HUD_DEBUG_SEARCH")]; }
     if (getenv("HUD_DEBUG_DETACH")) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [self toggleDetach:nil]; });
     if (getenv("HUD_DEBUG_SHOW")) dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1.5 * NSEC_PER_SEC), dispatch_get_main_queue(), ^{ [self toggle:nil]; });
 }
@@ -523,7 +533,8 @@ static OSStatus hotKeyHandler(EventHandlerCallRef next, EventRef event, void *us
         [m popUpMenuPositioningItem:nil atLocation:NSMakePoint(0, _item.button.bounds.size.height + 4) inView:_item.button]; return;
     }
     if (_panel) { if (_panel.isVisible) [_panel orderOut:nil]; else [self showPanel]; return; }
-    if (_popover.isShown) [_popover close]; else { [self tick]; [_popover showRelativeToRect:_item.button.bounds ofView:_item.button preferredEdge:NSRectEdgeMinY]; [_popover.contentViewController.view.window makeFirstResponder:_hud.table]; [NSApp activateIgnoringOtherApps:YES]; }
+    if (_popover.isShown) [_popover close]; else { [self tick]; [_popover showRelativeToRect:_item.button.bounds ofView:_item.button preferredEdge:NSRectEdgeMinY]; [_popover.contentViewController.view.window makeFirstResponder:_hud.table]; [NSApp activateIgnoringOtherApps:YES];
+        if (getenv("HUD_DEBUG_SHOW")) NSLog(@"popover window=%ld", (long)_popover.contentViewController.view.window.windowNumber); }
 }
 - (void)closePopover:(id)s { if (_panel) return; [_popover close]; }
 - (void)useWarp:(id)s { [[NSUserDefaults standardUserDefaults] setObject:@"warp" forKey:@"terminal"]; }

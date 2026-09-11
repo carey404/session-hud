@@ -1,0 +1,36 @@
+// Demo dataset for screenshots and first-run previews: generic sessions covering every state. Enabled with HUD_DEMO=1.
+const ago = (h: number) => new Date(Date.now() - h * 3600_000).toISOString();
+const id = (n: number) => `${n.toString(16).padStart(8, "0")}-4e2a-4c1b-9f3d-${(n * 7919).toString(16).padStart(12, "0").slice(0, 12)}`;
+type Agent = { id: string; type: string; description: string; startedAt?: string; endedAt?: string; status: "running" | "done"; source: "hook" };
+const agent = (i: number, description: string, status: "running" | "done", type = "general-purpose"): Agent => ({ id: `a${i}`, type, description, startedAt: ago(0.3), endedAt: status === "done" ? ago(0.1) : undefined, status, source: "hook" });
+
+const rows = [
+  { n: 1, title: "Auth Service Migration To OAuth2", about: "Replaced cookie sessions with OAuth2 flows across the API and web client, with a rollback path.", leftOff: "Migration script ready and tests green. Waiting on you: approve running the database migration against staging.", h: 0.02, project: "api", state: "needs_input", alive: true, kind: "interactive", turns: 14, needsInput: "permission_prompt", agents: [agent(1, "Audit token refresh edge cases", "done")] },
+  { n: 2, title: "Quarterly Metrics Dashboard Rebuild", about: "Rebuilt the metrics dashboard on the new warehouse tables and reconciled three definitions with finance.", leftOff: "Verifying revenue queries against the warehouse and regenerating charts. Next: review the retention panel before it ships.", h: 0.01, project: "analytics", state: "working", alive: true, kind: "interactive", turns: 22, agents: [agent(2, "Verify revenue queries against warehouse", "running"), agent(3, "Regenerate chart fixtures", "running"), agent(4, "Compare retention definitions", "done")] },
+  { n: 3, title: "Flaky Integration Test Investigation", about: "Traced intermittent CI failures in the payments suite to a shared fixture and a clock dependency.", leftOff: "Reproduced the failure locally in 1 of 40 runs. A subagent is bisecting the fixture changes since last month.", h: 0.05, project: "payments", state: "working", alive: true, kind: "interactive", turns: 9, agents: [agent(5, "Bisect fixture changes since last month", "running")] },
+  { n: 4, title: "Onboarding Email Sequence Copy", about: "Drafted a five-email onboarding sequence with subject line variants and a plain-text fallback.", leftOff: "All five drafts written. Open question: send day 3 on activation or on the calendar day?", h: 1.5, project: "growth", state: "idle", alive: true, kind: "interactive", turns: 11, agents: [] },
+  { n: 5, title: "Kubernetes Cost Reduction Plan", about: "Sized right-sizing, spot nodes and off-hours scaling against last quarter's cluster bill.", leftOff: "Plan document complete with three options and a 28 percent estimated saving. Ready for the infra review on Thursday.", h: 3.2, project: "infra", state: "idle", alive: true, kind: "interactive", turns: 17, agents: [agent(6, "Pull node utilisation for 90 days", "done"), agent(7, "Price spot capacity by region", "done")] },
+  { n: 6, title: "Dependency Upgrade Sweep", about: "Upgraded 41 packages across the monorepo, fixed two breaking changes and updated the lockfile.", leftOff: "All upgrades merged to a branch and CI is green. Pull request opened for review.", h: 2.1, project: "web", state: "bg_done", alive: false, kind: "background", turns: 3, agents: [agent(8, "Run the full test matrix", "done")] },
+  { n: 7, title: "Customer Churn Analysis Notebook", about: "Built a notebook segmenting churn by plan, tenure and support contacts, with a reusable query layer.", leftOff: "Notebook exported to HTML with six charts. Pending: confirm whether trial cancellations count as churn.", h: 6, project: "notebooks", state: "ended", alive: false, turns: 8, agents: [] },
+  { n: 8, title: "API Rate Limiting Design Doc", about: "Compared token bucket and sliding window approaches and wrote the design with rollout stages.", leftOff: "Design doc finished and shared for comments. Two reviewers still to respond.", h: 27, project: "api", state: "ended", alive: false, turns: 12, agents: [] },
+  { n: 9, title: "Weekly Team Update Draft", about: "Summarised the week's shipped work, risks and asks into the standard update format.", leftOff: "Update drafted with four highlights and one risk. Posted after your edits.", h: 30, project: "docs", state: "ended", alive: false, turns: 4, agents: [] },
+  { n: 10, title: "Mobile App Crash Triage", about: "Grouped 300 crash reports into four root causes and filed tickets with reproduction steps.", leftOff: "Four tickets filed, one hotfix merged. Remaining: the low-memory crash on older devices has no reproduction yet.", h: 70, project: "mobile", state: "ended", alive: false, turns: 15, agents: [agent(9, "Cluster crash signatures", "done")] },
+  { n: 11, title: "Contract Template Redline", about: "Reviewed the vendor contract template clause by clause and proposed redlines with rationale.", leftOff: "Redlined draft saved. Legal to confirm the liability cap wording before it goes back to the vendor.", h: 100, project: "legal", state: "ended", alive: false, turns: 6, agents: [] },
+  { n: 12, title: "Personal Finance Spreadsheet Cleanup", about: "Normalised twelve months of exports into one sheet with categories and a monthly summary tab.", leftOff: "Sheet cleaned and summary tab built. Nothing pending.", h: 220, project: "home", state: "ended", alive: false, turns: 5, agents: [] },
+  { n: 13, title: "Run the nightly backlog grooming report", about: null, leftOff: null, h: 9, project: "ops", state: "ended", alive: false, turns: 1, agents: [], automated: true },
+];
+
+export function demoView() {
+  const sessions = rows.map((r) => {
+    const sid = id(r.n); const running = r.agents.filter((a) => a.status === "running").length;
+    const live = r.alive || r.state === "bg_done" ? { pid: 40000 + r.n, kind: r.kind, name: r.title, status: r.state === "working" ? "busy" : "idle", state: r.state === "bg_done" ? "done" : undefined, waitingFor: r.needsInput ? "permission prompt" : undefined, shortId: r.kind === "background" ? sid.slice(0, 8) : undefined } : null;
+    return {
+      id: sid, shortId: sid.slice(0, 8), title: r.title, titleSource: r.about ? "summary" : "first-prompt", about: r.about, leftOff: r.leftOff,
+      lastActivityAt: ago(r.h), firstAt: ago(r.h + 2), lastPrompt: r.automated ? r.title : "continue with the next step", project: r.project, cwd: `/Users/you/code/${r.project}`, gitBranch: "main",
+      state: r.state, alive: r.alive, needsInput: r.needsInput ? "permission prompt" : null, live, agents: r.agents, runningAgents: running, turns: r.turns, costUSD: null, continuedIn: null, automated: !!r.automated,
+      resume: { command: r.kind === "background" ? `claude attach ${sid.slice(0, 8)}` : `claude --resume ${sid}`, forkCommand: `claude --resume ${sid} --fork-session`, cwd: `/Users/you/code/${r.project}` },
+    };
+  });
+  const c = (st: string) => sessions.filter((s) => s.state === st).length;
+  return { generatedAt: new Date().toISOString(), counts: { total: 312, needsInput: c("needs_input"), working: c("working"), alive: sessions.filter((s) => s.alive).length, summariesPending: 0 }, live: { updatedAt: new Date().toISOString(), error: null }, sessions };
+}

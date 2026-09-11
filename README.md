@@ -4,6 +4,14 @@ A macOS menubar heads-up display for every Claude Code session on your machine: 
 
 Built in a hackathon day. It leans on Claude Code's own state (`claude agents --json`, hook events) plus the local transcripts, and uses Haiku through your own Claude account to write the titles and summaries.
 
+<p align="center"><img src="docs/popover.png" width="560" alt="Session HUD popover under the menubar robot: sessions grouped into Needs input, Working and Open, each with a title, a one-line summary and a Left off line"></p>
+
+| Grouped history | Search | Floating panel |
+|---|---|---|
+| <img src="docs/history.png" alt="All sessions grouped by Today, Yesterday, This week and Earlier"> | <img src="docs/search.png" alt="Search filtering sessions by a word in their summaries"> | <img src="docs/panel.png" alt="The same list detached into a translucent floating panel"> |
+
+The screenshots show a demo dataset (`HUD_DEMO=1`), not anyone's real sessions.
+
 ## What you get
 
 - Menubar robot that turns orange with a count when a session is waiting on you.
@@ -61,7 +69,7 @@ defaults write com.sessionhud.app hotkeyModifiers -int 6144   # control + option
 - `app/main.m` AppKit menubar app in Objective-C, one file, built by `app/build.sh`.
 - `scripts/hud-hook.sh` the hook bridge; `scripts/install-hooks.ts` installs or removes it; `scripts/install-launch-agent.sh` optional login item (`--remove` to undo).
 
-Server environment variables: `HUD_PORT` (4243), `HUD_SUMMARISE=0` to disable the summariser, `HUD_SUMMARY_DAYS` (30), `HUD_SUMMARY_MODEL` (haiku), `HUD_SUMMARY_EFFORT` (low), `HUD_SUMMARY_THINKING` (0). App: `HUD_DEBUG_SHOW=1` opens the popover on launch, `HUD_DEBUG_DETACH=1` starts detached (run the binary directly; `open` drops env vars). Logs: `data/server.log`, `~/Library/Logs/SessionHUD.log`.
+Server environment variables: `HUD_PORT` (4243), `HUD_DEMO=1` to serve the generic demo dataset, `HUD_SUMMARISE=0` to disable the summariser, `HUD_SUMMARY_DAYS` (30), `HUD_SUMMARY_MODEL` (haiku), `HUD_SUMMARY_EFFORT` (low), `HUD_SUMMARY_THINKING` (0). App: `HUD_SERVER` overrides the server URL, `HUD_DEBUG_SHOW=1` opens the popover on launch, `HUD_DEBUG_DETACH=1` starts detached, `HUD_DEBUG_FILTER=2` and `HUD_DEBUG_SEARCH=word` preset the list (run the binary directly; `open` drops env vars). Logs: `data/server.log`, `~/Library/Logs/SessionHUD.log`.
 
 ## Uninstall
 

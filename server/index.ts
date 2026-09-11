@@ -12,6 +12,7 @@ const PORT = Number(process.env.HUD_PORT ?? 4243);
 const SUMMARY_DAYS = Number(process.env.HUD_SUMMARY_DAYS ?? 30);
 const SUMMARY_MODEL = process.env.HUD_SUMMARY_MODEL ?? "haiku";
 const SUMMARY_ENABLED = (process.env.HUD_SUMMARISE ?? "1") !== "0";
+const DEMO = process.env.HUD_DEMO === "1"; // serve a generic dataset for screenshots instead of your sessions
 mkdirSync(DATA_DIR, { recursive: true });
 
 // ---------- types ----------
@@ -350,17 +351,20 @@ function view() {
 }
 
 // ---------- boot ----------
-loadCache();
-const t0 = Date.now(); const changed = fullScan();
-console.log(`indexed ${sessions.size} sessions (${changed} changed) in ${Date.now() - t0} ms`);
-await pollLive();
-enqueueSummaries();
-setInterval(pollLive, 5000);
-setInterval(() => { if (fullScan()) enqueueSummaries(); }, 30_000); // safety net behind fs.watch
-let watchTimer: Timer | undefined;
-try {
-  watch(PROJECTS_DIR, { recursive: true }, () => { clearTimeout(watchTimer); watchTimer = setTimeout(() => { if (fullScan()) enqueueSummaries(); }, 400); });
-} catch (e) { console.error("fs.watch failed, polling only", e); }
+import { demoView } from "./demo";
+if (!DEMO) {
+  loadCache();
+  const t0 = Date.now(); const changed = fullScan();
+  console.log(`indexed ${sessions.size} sessions (${changed} changed) in ${Date.now() - t0} ms`);
+  await pollLive();
+  enqueueSummaries();
+  setInterval(pollLive, 5000);
+  setInterval(() => { if (fullScan()) enqueueSummaries(); }, 30_000); // safety net behind fs.watch
+  let watchTimer: Timer | undefined;
+  try {
+    watch(PROJECTS_DIR, { recursive: true }, () => { clearTimeout(watchTimer); watchTimer = setTimeout(() => { if (fullScan()) enqueueSummaries(); }, 400); });
+  } catch (e) { console.error("fs.watch failed, polling only", e); }
+} else console.log("demo mode: serving generic sessions");
 
 Bun.serve({
   port: PORT, hostname: "127.0.0.1",
@@ -368,7 +372,7 @@ Bun.serve({
     const url = new URL(req.url);
     const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json", "access-control-allow-origin": "*" } });
     if (url.pathname === "/health") return json({ ok: true, sessions: sessions.size, liveUpdatedAt, liveError: liveError ?? null, summariesPending: summaryQueue.length + summarising, hooksReceived, lastHook });
-    if (url.pathname === "/sessions") return json(view());
+    if (url.pathname === "/sessions") return json(DEMO ? demoView() : view());
     if (url.pathname === "/hook" && req.method === "POST") { try { applyHook(await req.json()); } catch (e) { return json({ ok: false }, 400); } return json({ ok: true }); }
     if (url.pathname === "/resummarise" && req.method === "POST") { const id = url.searchParams.get("id"); if (id) summaries.delete(id); else summaries.clear(); enqueueSummaries(); return json({ ok: true }); }
     return json({ error: "not found" }, 404);
