@@ -83,6 +83,7 @@ Then delete the checkout folder.
 
 ## Known limitations
 
+- Claude Code 2.1.269+ no longer writes interactive conversation records to the local transcript files (headless and cron sessions still do). The HUD therefore builds new sessions' titles, summaries and left-off lines from the hook events (`UserPromptSubmit` carries the prompt, `Stop` carries the last reply), so installing the hooks is effectively required on current versions, and sessions from before the hooks were installed cannot be re-summarised beyond what their old transcripts contain.
 - No tests. It is a one-day build; the indexer has only been exercised on one machine's transcripts.
 - One machine only; cloud sessions and the desktop app's sessions are not listed.
 - Subagent status for sessions started before the hooks were installed is inferred from transcript files rather than reported.

@@ -25,6 +25,7 @@ type Session = {
   firstAt?: string; lastActivityAt?: string; lastUserAt?: string; lastAssistantAt?: string;
   firstPrompt?: string; lastPrompt?: string; leafUuid?: string; lastAssistantText?: string;
   prompts?: string[]; replies?: string[]; // digest for the summariser: every real user prompt (capped), last few assistant texts
+  hookInteractive?: boolean; // a human typed a prompt (UserPromptSubmit); transcripts no longer carry this since CC 2.1.269
   aiTitle?: string; customTitle?: string; agentName?: string;
   turns: number; costUSD?: number; continuedIn?: string;
   pendingBackgroundAgents?: number;
@@ -202,7 +203,7 @@ function fullScan(): number {
     let files: string[] = []; try { files = readdirSync(dir); } catch { continue; }
     for (const f of files) if (f.endsWith(".jsonl")) { seen.add(basename(f, ".jsonl")); if (indexFile(p, join(dir, f))) changed++; }
   }
-  for (const id of [...sessions.keys()]) if (!seen.has(id)) sessions.delete(id);
+  for (const id of [...sessions.keys()]) { const sx = sessions.get(id)!; if (!seen.has(id) && sx.offset > 0 && !sx.hookInteractive) sessions.delete(id); }
   if (changed) scheduleSave();
   return changed;
 }
@@ -232,7 +233,7 @@ function summariserEnv(): Record<string, string> {
 const summaryQueue: string[] = []; let summarising = 0; const inQueue = new Set<string>();
 function needsSummary(s: Session): boolean {
   if (!SUMMARY_ENABLED || s.turns === 0 || !s.lastAssistantText) return false;
-  if (s.entrypoint && s.entrypoint !== "cli") return false; // automated (-p, cron) sessions keep their first-prompt title
+  if (s.entrypoint && s.entrypoint !== "cli") return false; // automated (-p, cron) sessions keep their first-prompt title; they still write local transcripts so entrypoint is known
   if (s.lastActivityAt && Date.now() - Date.parse(s.lastActivityAt) > SUMMARY_DAYS * 86_400_000) return false;
   const leaf = summaryLeaf(s); const cur = summaries.get(s.id);
   return !cur || cur.leaf !== leaf || cur.v !== SUMMARY_VERSION;
@@ -299,8 +300,8 @@ function applyHook(h: any) {
   const now = Date.now(); const iso = new Date(now).toISOString();
   s.lastActivityAt = iso;
   switch (h.hook_event_name) {
-    case "UserPromptSubmit": { s.hookStatus = "busy"; s.hookStatusAt = now; s.needsInput = undefined; const p = h.prompt ? cleanPrompt(String(h.prompt)) : ""; if (p && !isNoisePrompt(p)) { s.lastPrompt = p; s.lastUserAt = iso; } break; }
-    case "Stop": s.hookStatus = "idle"; s.hookStatusAt = now; s.needsInput = undefined; if (h.last_assistant_message) { s.lastAssistantText = String(h.last_assistant_message).slice(-3000); s.lastAssistantAt = iso; } break;
+    case "UserPromptSubmit": { s.hookStatus = "busy"; s.hookStatusAt = now; s.needsInput = undefined; const p = h.prompt ? cleanPrompt(String(h.prompt)) : ""; if (p && !isNoisePrompt(p)) { s.lastPrompt = p; s.lastUserAt = iso; s.turns++; if (!s.firstPrompt) s.firstPrompt = p; pushPrompt(s, p); s.hookInteractive = true; } break; }
+    case "Stop": s.hookStatus = "idle"; s.hookStatusAt = now; s.needsInput = undefined; if (h.last_assistant_message) { const t = String(h.last_assistant_message); s.lastAssistantText = t.slice(-3000); s.lastAssistantAt = iso; if (t.length > 80) pushReply(s, t); } break;
     case "SubagentStart": if (h.agent_id) s.agents[h.agent_id] = { id: h.agent_id, type: h.agent_type ?? "?", description: (h.subagent_prompt ?? h.description ?? "").slice(0, 160), startedAt: iso, status: "running", source: "hook" }; break;
     case "SubagentStop": if (h.agent_id) { const a = s.agents[h.agent_id] ?? { id: h.agent_id, type: h.agent_type ?? "?", description: "", source: "hook" as const, status: "done" as const }; a.status = "done"; a.endedAt = iso; a.source = "hook"; s.agents[h.agent_id] = a; } break;
     case "Notification": if (["permission_prompt", "agent_needs_input", "elicitation_dialog"].includes(h.notification_type)) s.needsInput = { type: h.notification_type, message: h.message, at: now }; break; // idle_prompt is just "waiting for your next prompt", not a blocker
@@ -334,7 +335,7 @@ function view() {
     else state = "ended";
     const shortBg = lv?.kind === "background" ? lv.id : undefined;
     const resume = shortBg && alive ? `claude attach ${shortBg}` : `claude --resume ${s.id}`;
-    const automated = s.turns === 0 || (s.entrypoint && s.entrypoint !== "cli");
+    const automated = (s.entrypoint && s.entrypoint !== "cli") || (s.turns === 0 && !s.hookInteractive);
     return {
       id: s.id, shortId: s.id.slice(0, 8), title, titleSource, about: sum?.about ?? null, leftOff: sum?.leftOff ?? null,
       lastActivityAt: s.lastActivityAt ?? s.firstAt ?? new Date(s.mtimeMs || 0).toISOString(), firstAt: s.firstAt ?? null, lastPrompt: s.lastPrompt ?? null,
