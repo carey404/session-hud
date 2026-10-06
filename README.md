@@ -26,7 +26,7 @@ The screenshots show a demo dataset (`HUD_DEMO=1`), not anyone's real sessions.
 - macOS 13 or later, Apple Silicon or Intel.
 - Xcode Command Line Tools (`xcode-select --install`). Only `clang` is used; no Xcode, no Swift.
 - [Bun](https://bun.sh) 1.1 or later.
-- Claude Code 2.1.2xx signed in. The summariser runs `claude -p --model haiku` under your account.
+- Claude Code 2.1.2xx signed in. The summariser runs `claude -p --model haiku` under your account, roughly once per session plus a few updates (see the spawn policy below).
 - Warp is optional. Without it, resume opens Terminal.app.
 
 ## Install
@@ -69,7 +69,7 @@ defaults write com.sessionhud.app hotkeyModifiers -int 6144   # control + option
 - `app/main.m` AppKit menubar app in Objective-C, one file, built by `app/build.sh`.
 - `scripts/hud-hook.sh` the hook bridge; `scripts/install-hooks.ts` installs or removes it; `scripts/install-launch-agent.sh` optional login item (`--remove` to undo).
 
-Server environment variables: `HUD_PORT` (4243), `HUD_DEMO=1` to serve the generic demo dataset, `HUD_SUMMARISE=0` to disable the summariser, `HUD_SUMMARY_DAYS` (30), `HUD_SUMMARY_MODEL` (haiku), `HUD_SUMMARY_EFFORT` (low), `HUD_SUMMARY_THINKING` (0). App: `HUD_SERVER` overrides the server URL, `HUD_DEBUG_SHOW=1` opens the popover on launch, `HUD_DEBUG_DETACH=1` starts detached, `HUD_DEBUG_FILTER=2` and `HUD_DEBUG_SEARCH=word` preset the list (run the binary directly; `open` drops env vars). Logs: `data/server.log`, `~/Library/Logs/SessionHUD.log`.
+Server environment variables: `HUD_PORT` (4243), `HUD_DEMO=1` to serve the generic demo dataset, `HUD_SUMMARISE=0` to disable the summariser, `HUD_SUMMARY_DAYS` (30), `HUD_SUMMARY_MODEL` (haiku), `HUD_SUMMARY_EFFORT` (low), `HUD_SUMMARY_THINKING` (0), `HUD_SUMMARY_IDLE_MIN` (10, minutes a session must be quiet before its summary is refreshed), `HUD_SUMMARY_BATCH` (5, sessions per `claude -p` process), `HUD_SUMMARY_COALESCE_S` (30, wait for stragglers before spawning), `HUD_SUMMARY_DAILY_CAP` (40 processes a day; `/health` reports `summariser.capped`). App: `HUD_SERVER` overrides the server URL, `HUD_DEBUG_SHOW=1` opens the popover on launch, `HUD_DEBUG_DETACH=1` starts detached, `HUD_DEBUG_FILTER=2` and `HUD_DEBUG_SEARCH=word` preset the list (run the binary directly; `open` drops env vars). Logs: `data/server.log`, `~/Library/Logs/SessionHUD.log`.
 
 ## Uninstall
 
@@ -87,6 +87,7 @@ Then delete the checkout folder.
 - No tests. It is a one-day build; the indexer has only been exercised on one machine's transcripts.
 - One machine only; cloud sessions and the desktop app's sessions are not listed.
 - Subagent status for sessions started before the hooks were installed is inferred from transcript files rather than reported.
+- Every `claude -p` is a full Claude Code process start. If your org pushes managed settings with OpenTelemetry export (Swarmia, Datadog and friends), each one counts as a "session" under your name, and the child process cannot opt out: `CLAUDE_CODE_ENABLE_TELEMETRY=0` in its environment is overridden once the managed settings load. The first version of this summariser re-ran after every reply and made one person look like 10x their real usage. The spawn policy now is: first summary straight away, a refresh on SessionEnd, otherwise only after `HUD_SUMMARY_IDLE_MIN` of quiet; pending sessions share one process (`HUD_SUMMARY_BATCH`); `HUD_SUMMARY_DAILY_CAP` backstops it. Expect roughly one process per real session plus a handful. `grep "summariser spawn" data/server.log` is the audit trail.
 - Headless `claude -p` loads every configured MCP connector unless told not to. The summariser passes `--strict-mcp-config --mcp-config '{"mcpServers":{}}'` and strips inherited `CLAUDE*` environment variables; without that a call costs 60k to 110k tokens.
 
 MIT licensed.

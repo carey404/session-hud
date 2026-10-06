@@ -12,6 +12,13 @@ const PORT = Number(process.env.HUD_PORT ?? 4243);
 const SUMMARY_DAYS = Number(process.env.HUD_SUMMARY_DAYS ?? 30);
 const SUMMARY_MODEL = process.env.HUD_SUMMARY_MODEL ?? "haiku";
 const SUMMARY_ENABLED = (process.env.HUD_SUMMARISE ?? "1") !== "0";
+// Spawn policy. Every `claude -p` is a full Claude Code process start, which org telemetry (managed settings, OTel) counts as a
+// session; summarising after every reply made one HUD look like 10x the real usage. So: a session gets its first summary
+// right away and on SessionEnd, otherwise only after it has been idle; pending sessions share one process; a daily spawn cap backstops it.
+const SUMMARY_IDLE_MS = Number(process.env.HUD_SUMMARY_IDLE_MIN ?? 10) * 60_000;
+const SUMMARY_BATCH = Math.max(1, Number(process.env.HUD_SUMMARY_BATCH ?? 5));
+const SUMMARY_COALESCE_MS = Number(process.env.HUD_SUMMARY_COALESCE_S ?? 30) * 1000;
+const SUMMARY_DAILY_CAP = Number(process.env.HUD_SUMMARY_DAILY_CAP ?? 40);
 const DEMO = process.env.HUD_DEMO === "1"; // serve a generic dataset for screenshots instead of your sessions
 mkdirSync(DATA_DIR, { recursive: true });
 
@@ -26,6 +33,7 @@ type Session = {
   firstPrompt?: string; lastPrompt?: string; leafUuid?: string; lastAssistantText?: string;
   prompts?: string[]; replies?: string[]; // digest for the summariser: every real user prompt (capped), last few assistant texts
   hookInteractive?: boolean; // a human typed a prompt (UserPromptSubmit); transcripts no longer carry this since CC 2.1.269
+  endedAt?: string; // SessionEnd hook seen and not resumed since: summarise now rather than waiting for idle
   aiTitle?: string; customTitle?: string; agentName?: string;
   turns: number; costUSD?: number; continuedIn?: string;
   pendingBackgroundAgents?: number;
@@ -231,6 +239,21 @@ function summariserEnv(): Record<string, string> {
   return env;
 }
 const summaryQueue: string[] = []; let summarising = 0; const inQueue = new Set<string>();
+const summaryFailedAt = new Map<string, number>(); // per-session backoff after a bad or empty result
+let waitingIdle = 0; // stale sessions holding for their idle window (reported, not queued)
+// daily spawn budget, persisted so a server restart does not reset it
+const SPAWNS_PATH = join(DATA_DIR, "summariser.json");
+let spawnDay = ""; let spawnsToday = 0; let capLogged = false;
+try { const j = JSON.parse(readFileSync(SPAWNS_PATH, "utf8")); spawnDay = j.day ?? ""; spawnsToday = Number(j.count ?? 0); } catch {}
+function spawnBudget(): boolean {
+  const d = new Date().toDateString();
+  if (d !== spawnDay) { spawnDay = d; spawnsToday = 0; capLogged = false; }
+  return spawnsToday < SUMMARY_DAILY_CAP;
+}
+function recordSpawn() { spawnBudget(); spawnsToday++; try { writeFileSync(SPAWNS_PATH, JSON.stringify({ day: spawnDay, count: spawnsToday })); } catch {} }
+function summariserStatus() { spawnBudget(); return { spawnsToday, dailyCap: SUMMARY_DAILY_CAP, capped: spawnsToday >= SUMMARY_DAILY_CAP, idleMin: SUMMARY_IDLE_MS / 60_000, batch: SUMMARY_BATCH, queued: summaryQueue.length, running: summarising, waitingIdle }; }
+
+// stale: the cached summary no longer matches the session (or there is none)
 function needsSummary(s: Session): boolean {
   if (!SUMMARY_ENABLED || s.turns === 0 || !s.lastAssistantText) return false;
   if (s.entrypoint && s.entrypoint !== "cli") return false; // automated (-p, cron) sessions keep their first-prompt title; they still write local transcripts so entrypoint is known
@@ -239,55 +262,93 @@ function needsSummary(s: Session): boolean {
   return !cur || cur.leaf !== leaf || cur.v !== SUMMARY_VERSION;
 }
 function summaryLeaf(s: Session) { return `${s.turns}:${s.lastAssistantAt ?? ""}:${(s.lastAssistantText ?? "").length}`; }
+// urgent: never summarised, or the session just ended. Due: urgent, or idle long enough that the user has moved on.
+function summaryUrgent(s: Session) { return !summaries.has(s.id) || !!s.endedAt; }
+function summaryDue(s: Session, now: number) {
+  if (summaryUrgent(s)) return true;
+  const failed = summaryFailedAt.get(s.id); if (failed && now - failed < 10 * 60_000) return false;
+  return !s.lastActivityAt || now - Date.parse(s.lastActivityAt) >= SUMMARY_IDLE_MS;
+}
+let coalesceTimer: Timer | undefined; let coalesceAt = 0;
 function enqueueSummaries() {
-  for (const s of sessions.values()) if (needsSummary(s) && !inQueue.has(s.id)) { inQueue.add(s.id); summaryQueue.push(s.id); }
+  const now = Date.now(); let urgent = false; waitingIdle = 0;
+  for (const s of sessions.values()) {
+    if (!needsSummary(s)) continue;
+    if (!summaryDue(s, now)) { waitingIdle++; continue; }
+    if (!inQueue.has(s.id)) { inQueue.add(s.id); summaryQueue.push(s.id); }
+    if (summaryUrgent(s)) urgent = true;
+  }
+  if (!summaryQueue.length) return;
   // newest first
   summaryQueue.sort((a, b) => (sessions.get(b)?.lastActivityAt ?? "").localeCompare(sessions.get(a)?.lastActivityAt ?? ""));
-  pumpSummaries();
+  // hold briefly so sessions that go stale together share one process; urgent work waits at most 5 s
+  const delay = urgent ? Math.min(5000, SUMMARY_COALESCE_MS) : SUMMARY_COALESCE_MS;
+  if (coalesceTimer && coalesceAt > now + delay) { clearTimeout(coalesceTimer); coalesceTimer = undefined; }
+  if (!coalesceTimer) { coalesceAt = now + delay; coalesceTimer = setTimeout(() => { coalesceTimer = undefined; pumpSummaries(); }, delay); }
 }
 async function pumpSummaries() {
-  while (summarising < 2 && summaryQueue.length) {
-    const id = summaryQueue.shift()!; inQueue.delete(id);
-    const s = sessions.get(id); if (!s || !needsSummary(s)) continue;
+  while (summarising < 1 && summaryQueue.length) {
+    if (!spawnBudget()) { if (!capLogged) { capLogged = true; console.log(`summariser daily cap ${SUMMARY_DAILY_CAP} reached, ${summaryQueue.length} queued until tomorrow`); } return; }
+    const batch: Session[] = [];
+    while (batch.length < SUMMARY_BATCH && summaryQueue.length) {
+      const id = summaryQueue.shift()!; inQueue.delete(id);
+      const s = sessions.get(id); if (s && needsSummary(s)) batch.push(s);
+    }
+    if (!batch.length) continue;
     summarising++;
-    summarise(s).catch((e) => console.error("summarise", id.slice(0, 8), e?.message ?? e)).finally(() => { summarising--; pumpSummaries(); });
+    summariseBatch(batch).catch((e) => { console.error("summarise", batch.map((s) => s.id.slice(0, 8)).join(","), e?.message ?? e); const t = Date.now(); for (const s of batch) summaryFailedAt.set(s.id, t); }).finally(() => { summarising--; pumpSummaries(); });
   }
 }
-async function summarise(s: Session) {
-  const leaf = summaryLeaf(s);
+function sessionDigest(s: Session, tag: string) {
   const hint = s.customTitle ?? s.aiTitle ?? "";
   const prompts = (s.prompts?.length ? s.prompts : [s.firstPrompt, s.lastPrompt].filter(Boolean) as string[]);
   const promptList = prompts.map((p, i) => `${i + 1}. ${inert(p)}`).join("\n");
   const replies = (s.replies?.length ? s.replies : [s.lastAssistantText ?? ""]).map((r) => inert(r)).map((r, i, a) => `--- reply ${a.length - i === 1 ? "(most recent)" : `(${a.length - i} back)`} ---\n${r}`).join("\n");
-  const span = s.firstAt && s.lastActivityAt ? `${s.firstAt.slice(0, 16)} to ${s.lastActivityAt.slice(0, 16)}` : "";
-  const prompt = `You write the row for one Claude Code session in a heads-up display the user scans when returning to work, sometimes a day later.
-The user typed ${prompts.length} prompts over ${span || "the session"}. Read ALL of them: the title and "about" must describe the whole session's work, not just the latest prompt.
-
-Return ONLY compact JSON with three fields:
-"title": 4 to 7 words, Title Case, the session's overall subject (the thing being built, decided, researched or written). Not the latest tweak.
-"about": one sentence, max 22 words, plain past tense, what the session accomplished across its arc.
-"leftOff": one or two sentences, max 40 words. First what the last exchange delivered, then what is still open: waiting on the user, a next step named in the last reply, or nothing pending. Be concrete: name the artifact, decision or question.
-
-Rules: no em-dashes, no marketing words, no "the user"; write as a colleague's note. If the hint title is a short code name the user chose (like "MBR"), you may reuse it inside the title but still make the title descriptive.
+  const span = s.firstAt && s.lastActivityAt ? `${s.firstAt.slice(0, 16)} to ${s.lastActivityAt.slice(0, 16)}` : "the session";
+  return `===== SESSION ${tag} =====
+The user typed ${prompts.length} prompts over ${span}.
 ${hint ? `Hint title (may be stale or a code name): ${inert(hint)}\n` : ""}
 USER PROMPTS IN ORDER:
 ${promptList}
 
 LAST ASSISTANT REPLIES:
 ${replies}`;
+}
+async function summariseBatch(batch: Session[]) {
+  const leaves = batch.map((s) => summaryLeaf(s)); // captured before the call; a session that moves on meanwhile goes stale again
+  const tags = batch.map((_, i) => `S${i + 1}`);
+  const prompt = `You write the rows for ${batch.length} Claude Code session${batch.length === 1 ? "" : "s"} in a heads-up display the user scans when returning to work, sometimes a day later.
+For each session read ALL of its prompts: the title and "about" must describe the whole session's work, not just the latest prompt.
+The sessions are independent. Never carry a detail from one into another.
+
+Return ONLY a compact JSON array with exactly ${batch.length} object${batch.length === 1 ? "" : "s"}, in the same order as the sessions, each with four fields:
+"id": the session tag exactly as given (${tags.join(", ")}).
+"title": 4 to 7 words, Title Case, the session's overall subject (the thing being built, decided, researched or written). Not the latest tweak.
+"about": one sentence, max 22 words, plain past tense, what the session accomplished across its arc.
+"leftOff": one or two sentences, max 40 words. First what the last exchange delivered, then what is still open: waiting on the user, a next step named in the last reply, or nothing pending. Be concrete: name the artifact, decision or question.
+
+Rules: no em-dashes, no marketing words, no "the user"; write as a colleague's note. If a hint title is a short code name the user chose (like "MBR"), you may reuse it inside the title but still make the title descriptive.
+
+${batch.map((s, i) => sessionDigest(s, tags[i])).join("\n\n")}`;
+  recordSpawn();
   const proc = Bun.spawn(["claude", "-p", "--model", SUMMARY_MODEL, "--effort", process.env.HUD_SUMMARY_EFFORT ?? "low", "--no-session-persistence", "--setting-sources", "", "--tools", "", "--strict-mcp-config", "--mcp-config", "{\"mcpServers\":{}}", "--system-prompt", "You output only compact JSON. No prose, no code fences.", "--output-format", "json", prompt],
     { stdout: "pipe", stderr: "pipe", cwd: DATA_DIR, env: summariserEnv() });
   const out = await new Response(proc.stdout).text(); await proc.exited;
   let result = ""; let meta: any = {}; try { meta = JSON.parse(out); result = meta.result ?? ""; } catch { result = out; }
   const u = meta.usage ?? {};
-  console.log(`summary ${s.id.slice(0, 8)} in=${(u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)} cacheRead=${u.cache_read_input_tokens ?? 0} out=${u.output_tokens ?? 0} think=${u.output_tokens_details?.thinking_tokens ?? 0} cost=$${Number(meta.total_cost_usd ?? 0).toFixed(4)} api=${meta.duration_api_ms ?? "?"}ms`);
-  const m = result.match(/\{[\s\S]*\}/); if (!m) throw new Error("no JSON in summary: " + result.slice(0, 120));
-  const j = JSON.parse(m[0]);
+  console.log(`summariser spawn ${spawnsToday}/${SUMMARY_DAILY_CAP} today n=${batch.length} ids=${batch.map((s) => s.id.slice(0, 8)).join(",")} in=${(u.input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0)} cacheRead=${u.cache_read_input_tokens ?? 0} out=${u.output_tokens ?? 0} think=${u.output_tokens_details?.thinking_tokens ?? 0} cost=$${Number(meta.total_cost_usd ?? 0).toFixed(4)} api=${meta.duration_api_ms ?? "?"}ms`);
+  const m = result.match(/\[[\s\S]*\]/) ?? result.match(/\{[\s\S]*\}/); if (!m) throw new Error("no JSON in summary: " + result.slice(0, 120));
+  const parsed = JSON.parse(m[0]); const arr: any[] = Array.isArray(parsed) ? parsed : [parsed];
   const fix = (x: unknown) => String(x ?? "").replace(/[—–]/g, "-").replace(/\s+/g, " ").trim();
-  const title = fix(j.title), about = fix(j.about), leftOff = fix(j.leftOff);
-  if (!title) throw new Error("empty title");
-  summaries.set(s.id, { leaf, title, about, leftOff, at: new Date().toISOString(), v: SUMMARY_VERSION });
-  scheduleSave();
+  const now = Date.now(); const at = new Date(now).toISOString(); let ok = 0;
+  batch.forEach((s, i) => {
+    const j = arr.find((e) => fix(e?.id).toUpperCase() === tags[i]) ?? (arr.length === batch.length ? arr[i] : undefined);
+    const title = fix(j?.title), about = fix(j?.about), leftOff = fix(j?.leftOff);
+    if (!title) { console.error("summary", s.id.slice(0, 8), "missing or empty entry"); summaryFailedAt.set(s.id, now); return; }
+    summaries.set(s.id, { leaf: leaves[i], title, about, leftOff, at, v: SUMMARY_VERSION }); summaryFailedAt.delete(s.id); ok++;
+    console.log(`summary ${s.id.slice(0, 8)} ok: ${title}`);
+  });
+  if (ok) scheduleSave();
 }
 
 // ---------- hooks ----------
@@ -300,13 +361,13 @@ function applyHook(h: any) {
   const now = Date.now(); const iso = new Date(now).toISOString();
   s.lastActivityAt = iso;
   switch (h.hook_event_name) {
-    case "UserPromptSubmit": { s.hookStatus = "busy"; s.hookStatusAt = now; s.needsInput = undefined; const p = h.prompt ? cleanPrompt(String(h.prompt)) : ""; if (p && !isNoisePrompt(p)) { s.lastPrompt = p; s.lastUserAt = iso; s.turns++; if (!s.firstPrompt) s.firstPrompt = p; pushPrompt(s, p); s.hookInteractive = true; } break; }
+    case "UserPromptSubmit": { s.hookStatus = "busy"; s.hookStatusAt = now; s.needsInput = undefined; s.endedAt = undefined; const p = h.prompt ? cleanPrompt(String(h.prompt)) : ""; if (p && !isNoisePrompt(p)) { s.lastPrompt = p; s.lastUserAt = iso; s.turns++; if (!s.firstPrompt) s.firstPrompt = p; pushPrompt(s, p); s.hookInteractive = true; } break; }
     case "Stop": s.hookStatus = "idle"; s.hookStatusAt = now; s.needsInput = undefined; if (h.last_assistant_message) { const t = String(h.last_assistant_message); s.lastAssistantText = t.slice(-3000); s.lastAssistantAt = iso; if (t.length > 80) pushReply(s, t); } break;
     case "SubagentStart": if (h.agent_id) s.agents[h.agent_id] = { id: h.agent_id, type: h.agent_type ?? "?", description: (h.subagent_prompt ?? h.description ?? "").slice(0, 160), startedAt: iso, status: "running", source: "hook" }; break;
     case "SubagentStop": if (h.agent_id) { const a = s.agents[h.agent_id] ?? { id: h.agent_id, type: h.agent_type ?? "?", description: "", source: "hook" as const, status: "done" as const }; a.status = "done"; a.endedAt = iso; a.source = "hook"; s.agents[h.agent_id] = a; } break;
     case "Notification": if (["permission_prompt", "agent_needs_input", "elicitation_dialog"].includes(h.notification_type)) s.needsInput = { type: h.notification_type, message: h.message, at: now }; break; // idle_prompt is just "waiting for your next prompt", not a blocker
-    case "SessionStart": s.hookStatus = "idle"; s.hookStatusAt = now; break;
-    case "SessionEnd": s.hookStatus = undefined; s.needsInput = undefined; break;
+    case "SessionStart": s.hookStatus = "idle"; s.hookStatusAt = now; s.endedAt = undefined; break;
+    case "SessionEnd": s.hookStatus = undefined; s.needsInput = undefined; s.endedAt = iso; break;
   }
   // transcript may lag the hook; pick up the file shortly after
   setTimeout(() => { if (s && indexFile(s.project, s.file)) scheduleSave(); enqueueSummaries(); }, 1500);
@@ -348,7 +409,7 @@ function view() {
   }).sort((a, b) => b.lastActivityAt.localeCompare(a.lastActivityAt));
   const needsInput = rows.filter((r) => r.state === "needs_input").length;
   const working = rows.filter((r) => r.state === "working").length;
-  return { generatedAt: new Date(now).toISOString(), counts: { total: rows.length, needsInput, working, alive: rows.filter((r) => r.alive).length, summariesPending: summaryQueue.length + summarising }, live: { updatedAt: liveUpdatedAt ? new Date(liveUpdatedAt).toISOString() : null, error: liveError ?? null }, sessions: rows };
+  return { generatedAt: new Date(now).toISOString(), counts: { total: rows.length, needsInput, working, alive: rows.filter((r) => r.alive).length, summariesPending: summaryQueue.length + summarising, summariesWaitingIdle: waitingIdle, summariesCapped: summariserStatus().capped }, live: { updatedAt: liveUpdatedAt ? new Date(liveUpdatedAt).toISOString() : null, error: liveError ?? null }, sessions: rows };
 }
 
 // ---------- boot ----------
@@ -361,6 +422,7 @@ if (!DEMO) {
   enqueueSummaries();
   setInterval(pollLive, 5000);
   setInterval(() => { if (fullScan()) enqueueSummaries(); }, 30_000); // safety net behind fs.watch
+  setInterval(enqueueSummaries, 60_000); // releases sessions whose idle window has elapsed
   let watchTimer: Timer | undefined;
   try {
     watch(PROJECTS_DIR, { recursive: true }, () => { clearTimeout(watchTimer); watchTimer = setTimeout(() => { if (fullScan()) enqueueSummaries(); }, 400); });
@@ -372,7 +434,7 @@ Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
     const json = (b: unknown, status = 200) => new Response(JSON.stringify(b), { status, headers: { "content-type": "application/json", "access-control-allow-origin": "*" } });
-    if (url.pathname === "/health") return json({ ok: true, sessions: sessions.size, liveUpdatedAt, liveError: liveError ?? null, summariesPending: summaryQueue.length + summarising, hooksReceived, lastHook });
+    if (url.pathname === "/health") return json({ ok: true, sessions: sessions.size, liveUpdatedAt, liveError: liveError ?? null, summariesPending: summaryQueue.length + summarising, summariser: summariserStatus(), hooksReceived, lastHook });
     if (url.pathname === "/sessions") return json(DEMO ? demoView() : view());
     if (url.pathname === "/hook" && req.method === "POST") { try { applyHook(await req.json()); } catch (e) { return json({ ok: false }, 400); } return json({ ok: true }); }
     if (url.pathname === "/resummarise" && req.method === "POST") { const id = url.searchParams.get("id"); if (id) summaries.delete(id); else summaries.clear(); enqueueSummaries(); return json({ ok: true }); }
